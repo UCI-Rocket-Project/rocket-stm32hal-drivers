@@ -1,12 +1,10 @@
 #pragma once
 
+#include <cstdint>
+
 // if this is shitting itself, just locally replace it with whatever
 // header on your machine that can get you `I2C_HandleTypeDef`
-#if defined(STM32F1)
-#include "stm32f1xx_hal.h"
-#elif defined(STM32F4xx)
-#include "stm32f4xx_hal.h"
-#endif
+#include "main.h"
 
 #include "ubxMessages.h"
 #include "ubxPacket.h"

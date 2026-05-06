@@ -1,6 +1,8 @@
 #pragma once
 
-#include "stm32f1xx_hal.h"
+#include <cstdint>
+
+#include "main.h" // # includes "stm32xxxx_hal.h"
 
 /**
     868 MHz band (EU) → 863–870 MHz

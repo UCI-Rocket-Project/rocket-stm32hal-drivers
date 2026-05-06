@@ -1,10 +1,8 @@
 #pragma once
 
-#if defined(STM32F1)
-#include "stm32f1xx_hal.h"
-#elif defined(STM32F4xx)
-#include "stm32f4xx_hal.h"
-#endif
+#include <cstdint>
+
+#include "main.h" // # includes "stm32xxxx_hal.h"
 
 class AltimeterMs5607Spi {
   public:

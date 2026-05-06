@@ -7,10 +7,9 @@
 #pragma once
 
 #include <cmath>
+#include <cstdint>
 
-#if defined(STM32F1)
-#include "stm32f1xx_hal.h"
-#endif
+#include "main.h" // # includes "stm32xxxx_hal.h"
 
 #ifndef SPI_Timeout
 #define SPI_Timeout 10
