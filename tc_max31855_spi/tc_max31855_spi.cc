@@ -2,6 +2,11 @@
 
 TcMax31855Spi::TcMax31855Spi(SPI_HandleTypeDef *hspi, GPIO_TypeDef *csPort, uint16_t csPin, uint32_t timeout) : _hspi(hspi), _csPort(csPort), _csPin(csPin), _timeout(timeout) {}
 
+void TcMax31855Spi::Init(){
+    HAL_GPIO_WritePin(_csPort, _csPin, GPIO_PIN_SET);
+}
+
+
 TcMax31855Spi::Data TcMax31855Spi::Read() {
     TcMax31855Spi::Data data;
     data.valid = false;

@@ -23,6 +23,8 @@ class TcMax31855Spi {
      */
     TcMax31855Spi(SPI_HandleTypeDef *hspi, GPIO_TypeDef *csPort, uint16_t csPin, uint32_t timeout);
 
+    void Init();
+
     Data Read();
 
   private:

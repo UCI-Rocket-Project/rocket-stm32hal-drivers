@@ -1,5 +1,4 @@
 #include "gnss_ubloxM8_uart.h"
-#include "stm32f4xx_hal.h"
 #include "ubx_messages.h"
 
 GnssUbloxM8Uart::GnssUbloxM8Uart(UART_HandleTypeDef *huart, unsigned int serialTimeout) : _huart(huart), _serialTimeout(serialTimeout) {}
