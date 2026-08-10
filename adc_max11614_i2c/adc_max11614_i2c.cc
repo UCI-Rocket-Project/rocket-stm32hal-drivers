@@ -1,26 +1,36 @@
 #include "adc_max11614_i2c.h"
 
+#include <algorithm>
 #include <cstdint>
 
 AdcMax11614i2c::AdcMax11614i2c(I2C_HandleTypeDef* hi2c, GPIO_TypeDef* sclPort, uint16_t sclPin, GPIO_TypeDef* sdaPort, uint16_t sdaPin)
     : _hi2c(hi2c), _sclPort(sclPort), _sclPin(sclPin), _sdaPort(sdaPort), _sdaPin(sdaPin) {}
 
-bool AdcMax11614i2c::Init() {
-    // write setup byte
-    // REG bit = 1 for setup byte
-    // SEL[2:0] all 0 sets reference voltage to VDD
-    // CLK bit = 0 for internal clock
-    // UNI/BIP bit doesn't matter in single-ended (non-differential) mode, set default (0)
-    // RST bit = 0 to reset configuration register
-    // don't care bit
-    uint8_t setupByte = 0b10000000;
+bool AdcMax11614i2c::Init(const Config& config) {
+    _config = config;
 
-    return HAL_I2C_Master_Transmit(_hi2c, ADC_MAX_I2C_ADDRESS << 1, &setupByte, 1, ADC_MAX_I2C_TIMEOUT_MS) == HAL_OK;
+    // build setup byte
+    uint8_t setupByte = 0b10000000;  // REG bit = 1 for setup byte
+    setupByte |= (static_cast<uint8_t>(_config.refMode) << 4);
+    setupByte |= (static_cast<uint8_t>(_config.clockMode) << 3);
+    setupByte |= (static_cast<uint8_t>(_config.polarity) << 2);
+    // bit 1 (RST) = 0 to reset config register, Bit 0 (X) = 0
+
+    // try to write setup byte up to maxAttempts times
+    uint8_t attempts = std::max<uint8_t>(1, _config.maxAttempts);
+    for (uint8_t i = 0; i < attempts; ++i) {
+        if (HAL_I2C_Master_Transmit(_hi2c, ADC_MAX_I2C_ADDRESS << 1, &setupByte, 1, ADC_MAX_I2C_TIMEOUT_MS) == HAL_OK) {
+            return true;
+        }
+
+        HAL_Delay(ADC_MAX_I2C_RETRY_DELAY_MS);
+    }
+
+    return false;
 }
 
-AdcMax11614i2c::Data AdcMax11614i2c::Read(uint16_t channelSelect) {
-    // data starts with all -1s; reading a channel overwrites these values
-    AdcMax11614i2c::Data data;
+std::optional<AdcMax11614i2c::Data> AdcMax11614i2c::Read(uint16_t channelSelect) {
+    Data data;
 
     // if no channels selected, return early
     if (channelSelect == 0) return data;
@@ -34,9 +44,6 @@ AdcMax11614i2c::Data AdcMax11614i2c::Read(uint16_t channelSelect) {
         }
     }
 
-    // ADC can only read from a single channel, [0:CHANNEL], or [6:CHANNEL] for channels 0-7
-    // figure out what's more efficient
-    // this reads extra data if there are gaps between selected channels
     uint8_t scanMode;
     uint8_t startChannel;
 
@@ -52,28 +59,38 @@ AdcMax11614i2c::Data AdcMax11614i2c::Read(uint16_t channelSelect) {
         startChannel = 0;
     }
 
-    // includes extra channels read
     uint8_t numChannels = (maxChannel - startChannel) + 1;
 
-    // write configuration byte, which changes based on channel select
+    // write configuration byte
     uint8_t configurationByte = 0b00000000;
+    configurationByte |= (0 << 7);                                 // REG bit = 0 for configuration byte
+    configurationByte |= (scanMode << 5);                          // SCAN[1:0] selects scanning config
+    configurationByte |= (maxChannel << 1);                        // CS[3:0] selects upper channel
+    configurationByte |= static_cast<uint8_t>(_config.inputMode);  // SGL/DIF based on persistent config
 
-    configurationByte |= (0 << 7);           // REG bit = 0 for configuration byte
-    configurationByte |= (scanMode << 5);    // SCAN[1:0] selects scanning config (see above)
-    configurationByte |= (maxChannel << 1);  // CS[3:0] selects upper channel (or only channel in single channel mode)
-    configurationByte |= 1;                  // SGL/DIF = 1 for single-ended mode (not differential)
+    bool transactionSuccess = false;
+    uint8_t readBuffer[16] = {0};  // Initialize to 0x00 so corrupted headers can be caught
 
-    if (HAL_I2C_Master_Transmit(_hi2c, ADC_MAX_I2C_ADDRESS << 1, &configurationByte, 1, ADC_MAX_I2C_TIMEOUT_MS) != HAL_OK) {
-        return data;  // all -1 on write failure
+    uint8_t attempts = std::max<uint8_t>(1, _config.maxAttempts);
+    for (uint8_t i = 0; i < attempts; ++i) {
+        // transmit the configuration byte to start the conversion
+        if (HAL_I2C_Master_Transmit(_hi2c, ADC_MAX_I2C_ADDRESS << 1, &configurationByte, 1, ADC_MAX_I2C_TIMEOUT_MS) != HAL_OK) {
+            HAL_Delay(ADC_MAX_I2C_RETRY_DELAY_MS);
+            continue;  // Transmit failed, retry
+        }
+
+        // ADC uses clock stretching to allow reading data as soon as config byte is written
+        // receive the data
+        if (HAL_I2C_Master_Receive(_hi2c, ADC_MAX_I2C_ADDRESS << 1, readBuffer, 2 * numChannels, numChannels * ADC_MAX_I2C_TIMEOUT_MS) == HAL_OK) {
+            transactionSuccess = true;
+            break;  // Both tx and rx succeeded
+        } else {
+            HAL_Delay(ADC_MAX_I2C_RETRY_DELAY_MS);
+        }
     }
 
-    // initialize with 0x00 because a successful read sets the first 4 MSB high, so reading 0 means invalid
-    int8_t readBuffer[16] = {0};
-
-    // receive data into raw array, 2 bytes per channel (12 bits max set for 4096)
-    // longer timeout for receive since it stretches clock for each channel
-    if (HAL_I2C_Master_Receive(_hi2c, ADC_MAX_I2C_ADDRESS << 1, readBuffer, 2 * numChannels, numChannels * ADC_MAX_I2C_TIMEOUT_MS) != HAL_OK) {
-        return data;  // all -1 on read failure
+    if (!transactionSuccess) {
+        return std::nullopt;  // total I2C failure after max attempts
     }
 
     // parse data into struct
@@ -89,7 +106,6 @@ AdcMax11614i2c::Data AdcMax11614i2c::Read(uint16_t channelSelect) {
             rawValue = ((byte1 & 0x0F) << 8) | byte2;
         } else {
             // the data is corrupted, empty, or failed to transmit
-            // explicitly set this specific channel to -1 error flag.
             rawValue = -1;
         }
 
