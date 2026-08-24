@@ -19,9 +19,11 @@ Calling the `Init()` method with a Config object writes the configuration byte t
 
 ### Reading Data
 
-Calling the `Read()` method with a 8-bit bitmask `channel_select` argument will attempt to read data from the specified channels and return `std::optional<Data>`. Since the ADC can only read a single channel, from channel 0 up to a selected channel, or from channel 6 up to a selected channel, **this may read extraneous channels in order to capture the ones specified**.
+Calling the `StartReadAsync()` method with a 8-bit bitmask `channel_select` argument will attempt to read data from the specified channels and return `true` if it successfully transmits a read request, with `false` otherwise. Since the ADC can only read a single channel, from channel 0 up to a selected channel, or from channel 6 up to a selected channel, **this may read extraneous channels in order to capture the ones specified**.
 
-This method will return `std::nullopt` if the entire read/write cycle fails after `max_attempts` tries, and -1 for any channels that were either not read or whose data was corrupted. This allows the user to handle I2C failures separately from per-channel failures, as well as ignore channels whose data was not requested.
+The caller should check `ISDataReady` after initiating the read and before calling `FetchData()`.
+
+The `FetchData()` method will return `std::nullopt` if the entire read/write cycle fails after `max_attempts` tries, and -1 for any channels that were either not read or whose data was corrupted. This allows the user to handle I2C failures separately from per-channel failures, as well as ignore channels whose data was not requested.
 
 ## Current Limitations
 
@@ -52,13 +54,22 @@ if (!adcDriver.Init(adcConfig)) {
 }
 
 // 3. Read channels (e.g., bitmask 0b00000111 to read Ch 0, 1, and 2)
-std::optional<AdcMax11614i2c::Data> adcData = adcDriver.Read(0x07);
-
-// 4. Process returned optional data
-if (adcData.has_value()) {
-    int16_t ch0 = adcData.channelOutput0;
-    // Process valid data
-} else {
-    // Handle total I2C transaction failure
+if (!adcDriver.StartReadAsync()) {
+    // Handle read configuration transmission error
 }
+
+// ... handle other tasks while waiting ...
+
+// 4. Get data once it's ready
+if (adcDriver.IsDataReady()) {
+    std::optional<AdcMax11614i2c::Data> adcData = adcDriver.Read(0x07);
+    // 5. Process returned optional data
+    if (adcData.has_value()) {
+        int16_t ch0 = adcData.channelOutput0;
+        // ... process valid data
+    } else {
+        // Handle total I2C transaction failure
+    }
+}
+
 ```

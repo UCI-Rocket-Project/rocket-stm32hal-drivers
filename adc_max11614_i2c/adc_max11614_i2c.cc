@@ -3,8 +3,14 @@
 #include <algorithm>
 #include <cstdint>
 
+// initialize the static instance pointer
+AdcMax11614i2c* AdcMax11614i2c::_instance = nullptr;
+
 AdcMax11614i2c::AdcMax11614i2c(I2C_HandleTypeDef* hi2c, GPIO_TypeDef* sclPort, uint16_t sclPin, GPIO_TypeDef* sdaPort, uint16_t sdaPin)
-    : _hi2c(hi2c), _sclPort(sclPort), _sclPin(sclPin), _sdaPort(sdaPort), _sdaPin(sdaPin) {}
+    : _hi2c(hi2c), _sclPort(sclPort), _sclPin(sclPin), _sdaPort(sdaPort), _sdaPin(sdaPin) {
+    // register this instance for the HAL callbacks
+    _instance = this; 
+}
 
 bool AdcMax11614i2c::Init(const Config& config) {
     _config = config;
@@ -29,11 +35,14 @@ bool AdcMax11614i2c::Init(const Config& config) {
     return false;
 }
 
-std::optional<AdcMax11614i2c::Data> AdcMax11614i2c::Read(uint16_t channelSelect) {
-    Data data;
-
+bool AdcMax11614i2c::StartReadAsync(uint16_t channelSelect) {
+    // check if hardware is currently busy
+    if (_state != DriverState::IDLE && _state != DriverState::ERROR) {
+        return false; 
+    }
+    
     // if no channels selected, return early
-    if (channelSelect == 0) return data;
+    if (channelSelect == 0) return false;
 
     uint8_t minChannel = 8;
     uint8_t maxChannel = 0;
@@ -45,59 +54,84 @@ std::optional<AdcMax11614i2c::Data> AdcMax11614i2c::Read(uint16_t channelSelect)
     }
 
     uint8_t scanMode;
-    uint8_t startChannel;
-
+    
     // if only scanning one channel, use single channel scanning
     if (maxChannel == minChannel) {
         scanMode = 0b11;  // SCAN[1:0] = 11 (single channel selected)
-        startChannel = minChannel;
+        _startChannel = minChannel;
     } else if (minChannel >= 6) {  // else if the lowest requested channel is 6 or 7, use Upper Quartile scanning
         scanMode = 0b10;           // SCAN[1:0] = 10 (AIN6 to maxChannel)
-        startChannel = 6;
+        _startChannel = 6;
     } else {
         scanMode = 0b00;  // SCAN[1:0] =  00 (AIN0 to maxChannel)
-        startChannel = 0;
+        _startChannel = 0;
     }
 
-    uint8_t numChannels = (maxChannel - startChannel) + 1;
+    _numChannelsToRead = (maxChannel - _startChannel) + 1;
 
     // write configuration byte
-    uint8_t configurationByte = 0b00000000;
-    configurationByte |= (0 << 7);                                 // REG bit = 0 for configuration byte
-    configurationByte |= (scanMode << 5);                          // SCAN[1:0] selects scanning config
-    configurationByte |= (maxChannel << 1);                        // CS[3:0] selects upper channel
-    configurationByte |= static_cast<uint8_t>(_config.inputMode);  // SGL/DIF based on persistent config
+    _configByteTxBuffer = 0b00000000;
+    _configByteTxBuffer |= (0 << 7);                                 // REG bit = 0 for configuration byte
+    _configByteTxBuffer |= (scanMode << 5);                          // SCAN[1:0] selects scanning config
+    _configByteTxBuffer |= (maxChannel << 1);                        // CS[3:0] selects upper channel
+    _configByteTxBuffer |= static_cast<uint8_t>(_config.inputMode);  // SGL/DIF based on persistent config
 
-    bool transactionSuccess = false;
-    uint8_t readBuffer[16] = {0};  // Initialize to 0x00 so corrupted headers can be caught
+    // initialize to 0x00 so corrupted headers can be caught
+    for (int i = 0; i < 16; i++) {
+        _rxBuffer[i] = 0;
+    }
 
+    // lock state machine
+    _state = DriverState::TRANSMITTING;
+    
+    // transmit the configuration byte to start the conversion, retrying on failure
     uint8_t attempts = std::max<uint8_t>(1, _config.maxAttempts);
     for (uint8_t i = 0; i < attempts; ++i) {
-        // transmit the configuration byte to start the conversion
-        if (HAL_I2C_Master_Transmit(_hi2c, ADC_MAX_I2C_ADDRESS << 1, &configurationByte, 1, ADC_MAX_I2C_TIMEOUT_MS) != HAL_OK) {
-            HAL_Delay(ADC_MAX_I2C_RETRY_DELAY_MS);
-            continue;  // Transmit failed, retry
+        if (HAL_I2C_Master_Transmit_IT(_hi2c, ADC_MAX_I2C_ADDRESS << 1, &_configByteTxBuffer, 1) == HAL_OK) {
+            return true;
         }
 
-        // ADC uses clock stretching to allow reading data as soon as config byte is written
-        // receive the data
-        if (HAL_I2C_Master_Receive(_hi2c, ADC_MAX_I2C_ADDRESS << 1, readBuffer, 2 * numChannels, numChannels * ADC_MAX_I2C_TIMEOUT_MS) == HAL_OK) {
-            transactionSuccess = true;
-            break;  // Both tx and rx succeeded
-        } else {
-            HAL_Delay(ADC_MAX_I2C_RETRY_DELAY_MS);
-        }
+        HAL_Delay(ADC_MAX_I2C_RETRY_DELAY_MS);
     }
 
-    if (!transactionSuccess) {
-        return std::nullopt;  // total I2C failure after max attempts
+    _state = DriverState::ERROR;
+    return false;
+}
+
+void AdcMax11614i2c::HandleTxComplete() {
+    _state = DriverState::RECEIVING;
+    
+    // ADC uses clock stretching to allow reading data as soon as config byte is written
+    // receive the data
+    if (HAL_I2C_Master_Receive_IT(_hi2c, ADC_MAX_I2C_ADDRESS << 1, _rxBuffer, 2 * _numChannelsToRead) != HAL_OK) {
+        _state = DriverState::ERROR;
     }
+}
+
+void AdcMax11614i2c::HandleRxComplete() {
+    // mark state as complete so superloop knows it can pull data
+    _state = DriverState::DATA_READY;
+}
+
+void AdcMax11614i2c::HandleError() {
+    _state = DriverState::ERROR;
+}
+
+bool AdcMax11614i2c::IsDataReady() const {
+    return _state == DriverState::DATA_READY;
+}
+
+std::optional<AdcMax11614i2c::Data> AdcMax11614i2c::FetchData() {
+    // if called before transaction finished, return nullopt
+    if (_state != DriverState::DATA_READY) return std::nullopt;
+
+    Data data;
 
     // parse data into struct
-    for (uint8_t i = 0; i < numChannels; ++i) {
-        uint8_t currentChannel = startChannel + i;
-        uint8_t byte1 = readBuffer[i * 2];
-        uint8_t byte2 = readBuffer[(i * 2) + 1];
+    for (uint8_t i = 0; i < _numChannelsToRead; ++i) {
+        uint8_t currentChannel = _startChannel + i;
+        uint8_t byte1 = _rxBuffer[i * 2];
+        uint8_t byte2 = _rxBuffer[(i * 2) + 1];
         int16_t rawValue;
 
         // check for the '1111' header in the upper 4 bits
@@ -139,5 +173,22 @@ std::optional<AdcMax11614i2c::Data> AdcMax11614i2c::Read(uint16_t channelSelect)
         }
     }
 
+    // reset state machine for next read
+    _state = DriverState::IDLE; 
+    
     return data;
+}
+
+// global c callback routers
+
+void AdcMax11614i2c::HAL_TxCpltCallback(I2C_HandleTypeDef *hi2c) {
+    if (_instance && _instance->_hi2c == hi2c) _instance->HandleTxComplete();
+}
+
+void AdcMax11614i2c::HAL_RxCpltCallback(I2C_HandleTypeDef *hi2c) {
+    if (_instance && _instance->_hi2c == hi2c) _instance->HandleRxComplete();
+}
+
+void AdcMax11614i2c::HAL_ErrorCallback(I2C_HandleTypeDef *hi2c) {
+    if (_instance && _instance->_hi2c == hi2c) _instance->HandleError();
 }
