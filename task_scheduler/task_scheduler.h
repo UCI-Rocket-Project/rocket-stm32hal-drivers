@@ -94,4 +94,4 @@ private:
 
 // Include the implementation file directly so the compiler can access the template logic
 // Template classes can't use standard .cpp files
-#include "task_scheduler.inl"
+#include "task_scheduler.tpp"
