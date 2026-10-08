@@ -56,6 +56,7 @@ class AdcMax11614i2c {
         ReferenceMode refMode = ReferenceMode::VDD;
         Polarity polarity = Polarity::Unipolar;
         InputMode inputMode = InputMode::SingleEnded;
+        uint16_t channelSelect = 0xFF; // bitmask to select channels during initialization, defaults to all channels
     };
 
     // internal states for the non-blocking state machine
@@ -84,11 +85,17 @@ class AdcMax11614i2c {
     bool Init(const Config& config);
 
     /**
-     * @brief initiate a non-blocking read from selected channels
+     * @brief update the hardware channel selection configuration byte
      * @param channelSelect 8-bit bitmask specifying the channels to read from, 0-7
+     * @retval write status, true for success
+     */
+    bool SetChannels(uint16_t channelSelect);
+
+    /**
+     * @brief initiate a non-blocking read using the previously stored channel configuration
      * @retval true if the transaction successfully started on the bus
      */
-    bool StartReadAsync(uint16_t channelSelect);
+    bool StartReadAsync();
 
     /**
      * @brief check if the hardware has finished receiving data via interrupt
@@ -103,7 +110,6 @@ class AdcMax11614i2c {
     std::optional<Data> FetchData();
 
     // global c callback routers
-    static void HAL_TxCpltCallback(I2C_HandleTypeDef *hi2c);
     static void HAL_RxCpltCallback(I2C_HandleTypeDef *hi2c);
     static void HAL_ErrorCallback(I2C_HandleTypeDef *hi2c);
 
@@ -118,13 +124,11 @@ class AdcMax11614i2c {
     
     // async state machine variables
     volatile DriverState _state = DriverState::IDLE;
-    uint8_t _configByteTxBuffer; 
     uint8_t _rxBuffer[16];
     uint8_t _numChannelsToRead;
     uint8_t _startChannel;
 
     // internal interrupt handlers
-    void HandleTxComplete();
     void HandleRxComplete();
     void HandleError();
 
