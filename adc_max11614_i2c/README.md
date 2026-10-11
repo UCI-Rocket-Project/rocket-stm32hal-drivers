@@ -13,15 +13,17 @@ The driver exposes a `Config` struct that can be passed into the constructor. Th
 
 This defaults to using the ADC's internal clock for I2C, VDD for the reference voltage when converting data, and unipolar, single-ended channel mode (each of the 8 channels independently reads from 0-4095). Use the provided defaults unless overriding is strictly necessary. The default values were chosen from the electrical setup indicated by the GSE2.1 hardware repo, and `max_attempts` for I2C reads/writes was arbitrarily chosen to be **3**.
 
+The driver will default to reading every channel, unless overridden with `SetChannels()`.
+
 ### Initialization
 
 Calling the `Init()` method with a Config object writes the configuration byte to the ADC and returns a boolean status, with `true` indicating success. This write is attemped up to the `max_attempts` limit specified in the config struct, with currently a fixed dealy between attempts.
 
 ### Reading Data
 
-Calling the `StartReadAsync()` method with a 8-bit bitmask `channel_select` argument will attempt to read data from the specified channels and return `true` if it successfully transmits a read request, with `false` otherwise. Since the ADC can only read a single channel, from channel 0 up to a selected channel, or from channel 6 up to a selected channel, **this may read extraneous channels in order to capture the ones specified**.
+Calling the `StartReadAsync()` method will attempt to read data from the channels specified in the configuration struct/selected by `SetChannels()` with an 8-bit bitmask. It will return `true` if it successfully transmits a read request, with `false` otherwise. Since the ADC can only read from a single channel; from channel 0 up to a selected channel; or from channel 6 up to a selected channel, **this may read extraneous channels in order to capture the ones specified**.
 
-The caller should check `ISDataReady` after initiating the read and before calling `FetchData()`.
+The caller should check `ISDataReady()` after initiating the read and before calling `FetchData()`.
 
 The `FetchData()` method will return `std::nullopt` if the entire read/write cycle fails after `max_attempts` tries, and -1 for any channels that were either not read or whose data was corrupted. This allows the user to handle I2C failures separately from per-channel failures, as well as ignore channels whose data was not requested.
 
@@ -53,7 +55,7 @@ if (!adcDriver.Init(adcConfig)) {
     // Handle initialization failure
 }
 
-// 3. Read channels (e.g., bitmask 0b00000111 to read Ch 0, 1, and 2)
+// 3. Read channels (here using default of all 8 channels)
 if (!adcDriver.StartReadAsync()) {
     // Handle read configuration transmission error
 }
@@ -62,7 +64,7 @@ if (!adcDriver.StartReadAsync()) {
 
 // 4. Get data once it's ready
 if (adcDriver.IsDataReady()) {
-    std::optional<AdcMax11614i2c::Data> adcData = adcDriver.Read(0x07);
+    std::optional<AdcMax11614i2c::Data> adcData = adcDriver.FetchData();
     // 5. Process returned optional data
     if (adcData.has_value()) {
         int16_t ch0 = adcData.channelOutput0;
