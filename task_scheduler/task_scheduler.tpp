@@ -15,14 +15,14 @@ std::optional<size_t> TaskScheduler<MaxTasks, MaxDepsPerTask>::AddTask(TaskCallb
             _tasks[i].requiredDependencies = requiredDeps;
             _tasks[i].active = false;
             _tasks[i].next = MaxTasks;
-            
+
             for (size_t d = 0; d < MaxDepsPerTask; ++d) {
                 _tasks[i].dependencies[d] = false;
             }
             return i;
         }
     }
-    return std::nullopt; 
+    return std::nullopt;
 }
 
 template <size_t MaxTasks, size_t MaxDepsPerTask>
@@ -45,10 +45,9 @@ void TaskScheduler<MaxTasks, MaxDepsPerTask>::ScheduleTask(size_t id, uint32_t t
         _head = id;
     } else {
         size_t curr = _head;
-        
+
         // Iterate until we find a task scheduled LATER than our target time
-        while (_tasks[curr].next != MaxTasks && 
-               !TimeIsBefore(targetTime, _tasks[_tasks[curr].next].scheduledTime)) {
+        while (_tasks[curr].next != MaxTasks && !TimeIsBefore(targetTime, _tasks[_tasks[curr].next].scheduledTime)) {
             curr = _tasks[curr].next;
         }
         _tasks[id].next = _tasks[curr].next;
@@ -62,7 +61,9 @@ void TaskScheduler<MaxTasks, MaxDepsPerTask>::ScheduleTask(size_t id, uint32_t t
 template <size_t MaxTasks, size_t MaxDepsPerTask>
 void TaskScheduler<MaxTasks, MaxDepsPerTask>::SetDependency(size_t id, size_t depIndex, bool state) {
     if (id < MaxTasks && depIndex < _tasks[id].requiredDependencies) {
+        SCHEDULER_CRITICAL_ENTER();
         _tasks[id].dependencies[depIndex] = state;
+        SCHEDULER_CRITICAL_EXIT();
     }
 }
 
@@ -93,10 +94,10 @@ void TaskScheduler<MaxTasks, MaxDepsPerTask>::Run(uint32_t currentTime) {
         }
 
         if (depsMet) {
-            // Disable interrupts temporarily to prevent superloop modifying task at the same time
+            // Disable interrupts temporarily to prevent concurrent modifications
             SCHEDULER_CRITICAL_ENTER();
             size_t nextNode = t.next;
-            
+
             // Remove task from the linked list
             if (prev == MaxTasks) {
                 _head = nextNode;
@@ -104,15 +105,15 @@ void TaskScheduler<MaxTasks, MaxDepsPerTask>::Run(uint32_t currentTime) {
                 _tasks[prev].next = nextNode;
             }
 
-            // Re-enable interrupts
-            SCHEDULER_CRITICAL_EXIT();
-
-            // Clear state to prevent race conditions during self-rescheduling
+            // Clear state to prevent race conditions during self-rescheduling or ISR updates
             t.active = false;
             t.next = MaxTasks;
             for (size_t i = 0; i < t.requiredDependencies; ++i) {
                 t.dependencies[i] = false;
             }
+
+            // Re-enable interrupts
+            SCHEDULER_CRITICAL_EXIT();
 
             // Execute the task
             t.callback();
