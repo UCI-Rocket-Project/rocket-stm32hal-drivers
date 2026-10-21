@@ -15,14 +15,14 @@ std::optional<size_t> TaskScheduler<MaxTasks, MaxDepsPerTask>::AddTask(TaskCallb
             _tasks[i].requiredDependencies = requiredDeps;
             _tasks[i].active = false;
             _tasks[i].next = MaxTasks;
-
+            
             for (size_t d = 0; d < MaxDepsPerTask; ++d) {
                 _tasks[i].dependencies[d] = false;
             }
             return i;
         }
     }
-    return std::nullopt;
+    return std::nullopt; 
 }
 
 template <size_t MaxTasks, size_t MaxDepsPerTask>
@@ -45,9 +45,10 @@ void TaskScheduler<MaxTasks, MaxDepsPerTask>::ScheduleTask(size_t id, uint32_t t
         _head = id;
     } else {
         size_t curr = _head;
-
+        
         // Iterate until we find a task scheduled LATER than our target time
-        while (_tasks[curr].next != MaxTasks && !TimeIsBefore(targetTime, _tasks[_tasks[curr].next].scheduledTime)) {
+        while (_tasks[curr].next != MaxTasks && 
+               !TimeIsBefore(targetTime, _tasks[_tasks[curr].next].scheduledTime)) {
             curr = _tasks[curr].next;
         }
         _tasks[id].next = _tasks[curr].next;
@@ -61,70 +62,65 @@ void TaskScheduler<MaxTasks, MaxDepsPerTask>::ScheduleTask(size_t id, uint32_t t
 template <size_t MaxTasks, size_t MaxDepsPerTask>
 void TaskScheduler<MaxTasks, MaxDepsPerTask>::SetDependency(size_t id, size_t depIndex, bool state) {
     if (id < MaxTasks && depIndex < _tasks[id].requiredDependencies) {
-        SCHEDULER_CRITICAL_ENTER();
         _tasks[id].dependencies[depIndex] = state;
-        SCHEDULER_CRITICAL_EXIT();
     }
 }
 
 template <size_t MaxTasks, size_t MaxDepsPerTask>
 void TaskScheduler<MaxTasks, MaxDepsPerTask>::Run(uint32_t currentTime) {
-    size_t curr = _head;
-    size_t prev = MaxTasks;
+    std::array<bool, MaxTasks> executedInThisRun = {false};
 
-    // Iterates over the sorted linked list of tasks until finding the first task
-    // whose time hasn't passed yet
-    // Executes all tasks for which the time and dependency requirements have been met
-    while (curr != MaxTasks) {
-        Task& t = _tasks[curr];
+    // Repeatedly find the next task ready to run until no more ready tasks exist
+    while (true) {
+        size_t readyTask = MaxTasks;
 
-        // Bail out instantly if the current time has not reached the scheduled time
-        // This prevents us from checking any future tasks after this one
-        if (!TimeIsReady(currentTime, t.scheduledTime)) {
+        SCHEDULER_CRITICAL_ENTER();
+        size_t curr = _head;
+        while (curr != MaxTasks) {
+            Task& t = _tasks[curr];
+
+            // If scheduled time hasn't arrived, stop looking because the list is sorted
+            if (!TimeIsReady(currentTime, t.scheduledTime)) {
+                break;
+            }
+
+            if (!executedInThisRun[curr]) {
+                // Check dependencies
+                bool depsMet = true;
+                for (size_t i = 0; i < t.requiredDependencies; ++i) {
+                    if (!t.dependencies[i]) {
+                        depsMet = false;
+                        break;
+                    }
+                }
+
+                if (depsMet) {
+                    readyTask = curr;
+                    RemoveFromList(readyTask);
+                    break;
+                }
+            }
+
+            curr = t.next;
+        }
+        SCHEDULER_CRITICAL_EXIT();
+
+        // If no task is ready and eligible to run at currentTime, exit
+        if (readyTask == MaxTasks) {
             break;
         }
 
-        // Only check the active dependencies for this specific task
-        bool depsMet = true;
+        executedInThisRun[readyTask] = true;
+
+        Task& t = _tasks[readyTask];
+        t.active = false;
+        t.next = MaxTasks;
         for (size_t i = 0; i < t.requiredDependencies; ++i) {
-            if (!t.dependencies[i]) {
-                depsMet = false;
-                break;
-            }
+            t.dependencies[i] = false;
         }
 
-        if (depsMet) {
-            // Disable interrupts temporarily to prevent concurrent modifications
-            SCHEDULER_CRITICAL_ENTER();
-            size_t nextNode = t.next;
-
-            // Remove task from the linked list
-            if (prev == MaxTasks) {
-                _head = nextNode;
-            } else {
-                _tasks[prev].next = nextNode;
-            }
-
-            // Clear state to prevent race conditions during self-rescheduling or ISR updates
-            t.active = false;
-            t.next = MaxTasks;
-            for (size_t i = 0; i < t.requiredDependencies; ++i) {
-                t.dependencies[i] = false;
-            }
-
-            // Re-enable interrupts
-            SCHEDULER_CRITICAL_EXIT();
-
-            // Execute the task
-            t.callback();
-
-            // If the task was executed, we don't update prev since that task is not active now
-            curr = nextNode;
-        } else {
-            // Time is met but dependencies aren't; keep iterating
-            prev = curr;
-            curr = t.next;
-        }
+        // Execute the callback
+        t.callback();
     }
 }
 
