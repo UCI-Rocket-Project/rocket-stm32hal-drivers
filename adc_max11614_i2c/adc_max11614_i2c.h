@@ -11,18 +11,31 @@
 
 class AdcMax11614i2c {
   public:
-    static constexpr uint16_t maxChannelOutput = 4095; // 12-bit ADC max value
-    
+    static constexpr uint16_t maxChannelOutput = 4095;  // 12-bit ADC max value
+
     struct Data {
-        // adc channel output from 0-4096, with -1 meaning not read/could not be read
-        int16_t channelOutput0 = -1;
-        int16_t channelOutput1 = -1;
-        int16_t channelOutput2 = -1;
-        int16_t channelOutput3 = -1;
-        int16_t channelOutput4 = -1;
-        int16_t channelOutput5 = -1;
-        int16_t channelOutput6 = -1;
-        int16_t channelOutput7 = -1;
+        // 8-bit bitmask indicating whether each channel is good (1 = good, 0 = bad/not read)
+        uint8_t channelValidBitmask = 0;
+
+        // adc channel output from 0-4095, with 0 meaning not read/could not be read
+        uint16_t channelOutput0 = 0;
+        uint16_t channelOutput1 = 0;
+        uint16_t channelOutput2 = 0;
+        uint16_t channelOutput3 = 0;
+        uint16_t channelOutput4 = 0;
+        uint16_t channelOutput5 = 0;
+        uint16_t channelOutput6 = 0;
+        uint16_t channelOutput7 = 0;
+
+        /**
+         * @brief check if a specific channel was read successfully
+         * @param channel channel index 0-7
+         * @retval true if channel is good (bit is set)
+         */
+        bool IsChannelGood(uint8_t channel) const {
+            if (channel > 7) return false;
+            return (channelValidBitmask & (1 << channel)) != 0;
+        }
     };
 
     // strongly-typed enums for safe configuration
@@ -32,22 +45,22 @@ class AdcMax11614i2c {
     };
 
     enum class ReferenceMode : uint8_t {
-        VDD                      = 0b000,
-        External                 = 0b010,
-        Internal_AnalogIn        = 0b100,
-        Internal_AlwaysOn        = 0b101,
-        Internal_RefOut          = 0b110,
+        VDD = 0b000,
+        External = 0b010,
+        Internal_AnalogIn = 0b100,
+        Internal_AlwaysOn = 0b101,
+        Internal_RefOut = 0b110,
         Internal_RefOut_AlwaysOn = 0b111
     };
 
     enum class Polarity : uint8_t {
         Unipolar = 0,
-        Bipolar  = 1
+        Bipolar = 1
     };
 
     enum class InputMode : uint8_t {
         Differential = 0,
-        SingleEnded  = 1
+        SingleEnded = 1
     };
 
     struct Config {
@@ -56,7 +69,7 @@ class AdcMax11614i2c {
         ReferenceMode refMode = ReferenceMode::VDD;
         Polarity polarity = Polarity::Unipolar;
         InputMode inputMode = InputMode::SingleEnded;
-        uint16_t channelSelect = 0xFF; // bitmask to select channels during initialization, defaults to all channels
+        uint16_t channelSelect = 0xFF;  // bitmask to select channels during initialization, defaults to all channels
     };
 
     // internal states for the non-blocking state machine
@@ -93,7 +106,7 @@ class AdcMax11614i2c {
 
     /**
      * @brief initiate a non-blocking read using the previously stored channel configuration
-     * @retval true if the transaction successfully started on the bus
+     * @retval true if the transaction successfully started on the bus, false if busy or init failed
      */
     bool StartReadAsync();
 
@@ -109,9 +122,28 @@ class AdcMax11614i2c {
      */
     std::optional<Data> FetchData();
 
+    /**
+     * @brief check if driver initialization failed
+     * @retval true if initialization failed
+     */
+    bool InitFailed() const { return _initFailed; }
+    bool HasInitFailed() const { return _initFailed; }
+
+    /**
+     * @brief get the latest 8-bit channel status bitmask (1 = good)
+     * @retval 8-bit bitmask of channel status
+     */
+    uint8_t GetchannelValidBitmask() const { return _data.channelValidBitmask; }
+
+    /**
+     * @brief get the latest parsed channel data
+     * @retval const reference to latest Data
+     */
+    const Data& GetData() const { return _data; }
+
     // global c callback routers
-    static void HAL_RxCpltCallback(I2C_HandleTypeDef *hi2c);
-    static void HAL_ErrorCallback(I2C_HandleTypeDef *hi2c);
+    static void HAL_RxCpltCallback(I2C_HandleTypeDef* hi2c);
+    static void HAL_ErrorCallback(I2C_HandleTypeDef* hi2c);
 
   private:
     I2C_HandleTypeDef* _hi2c;
@@ -121,7 +153,13 @@ class AdcMax11614i2c {
     uint16_t _sdaPin;
 
     Config _config;
-    
+
+    // initialization status
+    bool _initFailed = false;
+
+    // latest parsed channel outputs and status bitmask
+    Data _data{};
+
     // async state machine variables
     volatile DriverState _state = DriverState::IDLE;
     uint8_t _rxBuffer[16];

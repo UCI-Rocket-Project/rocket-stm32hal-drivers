@@ -17,15 +17,15 @@ The driver will default to reading every channel, unless overridden with `SetCha
 
 ### Initialization
 
-Calling the `Init()` method with a Config object writes the configuration byte to the ADC and returns a boolean status, with `true` indicating success. This write is attemped up to the `max_attempts` limit specified in the config struct, with currently a fixed dealy between attempts.
+Calling the `Init()` method with a Config object writes the configuration byte to the ADC and returns a boolean status, with `true` indicating success. This write is attempted up to the `max_attempts` limit specified in the config struct (defaults to 3), with currently a fixed delay between attempts. If initialization fails after the attempts, the driver records that initialization failed and sets all channels and channel status to 0.
 
 ### Reading Data
 
-Calling the `StartReadAsync()` method will attempt to read data from the channels specified in the configuration struct/selected by `SetChannels()` with an 8-bit bitmask. It will return `true` if it successfully transmits a read request, with `false` otherwise. Since the ADC can only read from a single channel; from channel 0 up to a selected channel; or from channel 6 up to a selected channel, **this may read extraneous channels in order to capture the ones specified**.
+Calling the `StartReadAsync()` method will attempt to read data from the channels specified in the configuration struct/selected by `SetChannels()` with an 8-bit bitmask. If initialization failed earlier, `StartReadAsync()` returns `false` early without starting a transaction on the bus. Otherwise, it will return `true` if it successfully transmits a read request, with `false` if busy or transmission failed. Since the ADC can only read from a single channel; from channel 0 up to a selected channel; or from channel 6 up to a selected channel, **this may read extraneous channels in order to capture the ones specified**.
 
-The caller should check `ISDataReady()` after initiating the read and before calling `FetchData()`.
+The caller should check `IsDataReady()` after initiating the read and before calling `FetchData()`.
 
-The `FetchData()` method will return `std::nullopt` if the entire read/write cycle fails after `max_attempts` tries, and -1 for any channels that were either not read or whose data was corrupted. This allows the user to handle I2C failures separately from per-channel failures, as well as ignore channels whose data was not requested.
+The `FetchData()` method will return `std::nullopt` if the transaction is not ready or failed. Each channel read correctly will have its corresponding bit set to 1 in the 8-bit `channelValidBitmask` bitmask and its 12-bit output (0-4095) stored. Any channels that were corrupted, failed to transmit, or were not read will have their bit in the bitmask set to 0 and their channel output set to 0.
 
 ## Current Limitations
 
@@ -67,8 +67,10 @@ if (adcDriver.IsDataReady()) {
     std::optional<AdcMax11614i2c::Data> adcData = adcDriver.FetchData();
     // 5. Process returned optional data
     if (adcData.has_value()) {
-        int16_t ch0 = adcData.channelOutput0;
-        // ... process valid data
+        if (adcData->channelValidBitmask & (1 << 0)) { // or adcData->IsChannelGood(0)
+            uint16_t ch0 = adcData->channelOutput0;
+            // ... process valid data
+        }
     } else {
         // Handle total I2C transaction failure
     }

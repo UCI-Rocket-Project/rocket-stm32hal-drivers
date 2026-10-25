@@ -9,7 +9,7 @@ AdcMax11614i2c* AdcMax11614i2c::_instance = nullptr;
 AdcMax11614i2c::AdcMax11614i2c(I2C_HandleTypeDef* hi2c, GPIO_TypeDef* sclPort, uint16_t sclPin, GPIO_TypeDef* sdaPort, uint16_t sdaPin)
     : _hi2c(hi2c), _sclPort(sclPort), _sclPin(sclPin), _sdaPort(sdaPort), _sdaPin(sdaPin) {
     // register this instance for the HAL callbacks
-    _instance = this; 
+    _instance = this;
 }
 
 bool AdcMax11614i2c::Init(const Config& config) {
@@ -27,16 +27,28 @@ bool AdcMax11614i2c::Init(const Config& config) {
     bool setupSuccess = false;
     for (uint8_t i = 0; i < attempts; ++i) {
         if (HAL_I2C_Master_Transmit(_hi2c, ADC_MAX_I2C_ADDRESS << 1, &setupByte, 1, ADC_MAX_I2C_TIMEOUT_MS) == HAL_OK) {
-            return true;
+            setupSuccess = true;
+            break;
         }
 
         HAL_Delay(ADC_MAX_I2C_RETRY_DELAY_MS);
     }
 
-    if (!setupSuccess) return false;
+    if (!setupSuccess) {
+        _initFailed = true;
+        _data = Data{};
+        return false;
+    }
 
     // write configuration byte with initial channel select
-    return SetChannels(_config.channelSelect);
+    if (!SetChannels(_config.channelSelect)) {
+        _initFailed = true;
+        _data = Data{};
+        return false;
+    }
+
+    _initFailed = false;
+    return true;
 }
 
 bool AdcMax11614i2c::SetChannels(uint16_t channelSelect) {
@@ -55,7 +67,7 @@ bool AdcMax11614i2c::SetChannels(uint16_t channelSelect) {
     }
 
     uint8_t scanMode;
-    
+
     // if only scanning one channel, use single channel scanning
     if (maxChannel == minChannel) {
         scanMode = 0b11;  // SCAN[1:0] = 11 (single channel selected)
@@ -86,16 +98,21 @@ bool AdcMax11614i2c::SetChannels(uint16_t channelSelect) {
 
         HAL_Delay(ADC_MAX_I2C_RETRY_DELAY_MS);
     }
-    
+
     return false;
 }
 
 bool AdcMax11614i2c::StartReadAsync() {
+    // return false early if initialization failed earlier
+    if (_initFailed) {
+        return false;
+    }
+
     // check if hardware is currently busy
     if (_state != DriverState::IDLE && _state != DriverState::ERROR) {
-        return false; 
+        return false;
     }
-    
+
     // if no channels selected, return early
     if (_config.channelSelect == 0) return false;
 
@@ -106,7 +123,7 @@ bool AdcMax11614i2c::StartReadAsync() {
 
     // lock state machine
     _state = DriverState::TRANSMITTING;
-    
+
     // ADC executes the conversion automatically when addressed for a READ.
     // Receive_IT will send START + ADDR + READ, wait for clock stretching, read data, and send NACK + STOP.
     // this uses the ADC's single read cycle; we would have to continuously send ACK to read continuous results
@@ -128,13 +145,9 @@ void AdcMax11614i2c::HandleRxComplete() {
     _state = DriverState::DATA_READY;
 }
 
-void AdcMax11614i2c::HandleError() {
-    _state = DriverState::ERROR;
-}
+void AdcMax11614i2c::HandleError() { _state = DriverState::ERROR; }
 
-bool AdcMax11614i2c::IsDataReady() const {
-    return _state == DriverState::DATA_READY;
-}
+bool AdcMax11614i2c::IsDataReady() const { return _state == DriverState::DATA_READY; }
 
 std::optional<AdcMax11614i2c::Data> AdcMax11614i2c::FetchData() {
     // if called before transaction finished, return nullopt
@@ -147,15 +160,16 @@ std::optional<AdcMax11614i2c::Data> AdcMax11614i2c::FetchData() {
         uint8_t currentChannel = _startChannel + i;
         uint8_t byte1 = _rxBuffer[i * 2];
         uint8_t byte2 = _rxBuffer[(i * 2) + 1];
-        int16_t rawValue;
+        uint16_t rawValue;
 
         // check for the '1111' header in the upper 4 bits
         if ((byte1 & 0xF0) == 0xF0) {
             // the header is intact, mask it out and combine the remaining 12 bits
             rawValue = ((byte1 & 0x0F) << 8) | byte2;
+            data.channelValidBitmask |= (1 << currentChannel);
         } else {
             // the data is corrupted, empty, or failed to transmit
-            rawValue = -1;
+            rawValue = 0;
         }
 
         switch (currentChannel) {
@@ -188,18 +202,21 @@ std::optional<AdcMax11614i2c::Data> AdcMax11614i2c::FetchData() {
         }
     }
 
+    // store latest read data in the class
+    _data = data;
+
     // reset state machine for next read
-    _state = DriverState::IDLE; 
-    
+    _state = DriverState::IDLE;
+
     return data;
 }
 
 // global c callback routers
 
-void AdcMax11614i2c::HAL_RxCpltCallback(I2C_HandleTypeDef *hi2c) {
+void AdcMax11614i2c::HAL_RxCpltCallback(I2C_HandleTypeDef* hi2c) {
     if (_instance && _instance->_hi2c == hi2c) _instance->HandleRxComplete();
 }
 
-void AdcMax11614i2c::HAL_ErrorCallback(I2C_HandleTypeDef *hi2c) {
+void AdcMax11614i2c::HAL_ErrorCallback(I2C_HandleTypeDef* hi2c) {
     if (_instance && _instance->_hi2c == hi2c) _instance->HandleError();
 }
