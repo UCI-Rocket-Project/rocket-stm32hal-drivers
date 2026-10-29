@@ -2,8 +2,12 @@
 
 #pragma once
 
+#include <cassert>
+
 template <size_t MaxTasks, size_t MaxDepsPerTask>
-TaskScheduler<MaxTasks, MaxDepsPerTask>::TaskScheduler() {}
+TaskScheduler<MaxTasks, MaxDepsPerTask>::TaskScheduler(ClockFunction clock) : _clock(clock) {
+    assert(clock != nullptr);
+}
 
 template <size_t MaxTasks, size_t MaxDepsPerTask>
 std::optional<size_t> TaskScheduler<MaxTasks, MaxDepsPerTask>::AddTask(TaskCallback cb, size_t requiredDeps) {
@@ -13,25 +17,51 @@ std::optional<size_t> TaskScheduler<MaxTasks, MaxDepsPerTask>::AddTask(TaskCallb
         if (!_tasks[i].callback) {
             _tasks[i].callback = cb;
             _tasks[i].requiredDependencies = requiredDeps;
+            _tasks[i].scheduledTime = 0;
+            _tasks[i].timeInitialized = false;
             _tasks[i].active = false;
             _tasks[i].next = MaxTasks;
-            
+
             for (size_t d = 0; d < MaxDepsPerTask; ++d) {
                 _tasks[i].dependencies[d] = false;
             }
             return i;
         }
     }
-    return std::nullopt; 
+    return std::nullopt;
 }
 
 template <size_t MaxTasks, size_t MaxDepsPerTask>
-void TaskScheduler<MaxTasks, MaxDepsPerTask>::ScheduleTask(size_t id, uint32_t targetTime) {
+void TaskScheduler<MaxTasks, MaxDepsPerTask>::ScheduleTaskTargetTime(size_t id, uint32_t targetTime) {
     if (id >= MaxTasks || !_tasks[id].callback) return;
 
     // Disable interrupts temporarily to prevent superloop modifying task at the same time
     SCHEDULER_CRITICAL_ENTER();
 
+    // After first execution, this time becomes the baseline for later deltas.
+    ScheduleTask(id, targetTime);
+
+    SCHEDULER_CRITICAL_EXIT();
+}
+
+template <size_t MaxTasks, size_t MaxDepsPerTask>
+void TaskScheduler<MaxTasks, MaxDepsPerTask>::ScheduleTaskDeltaTime(size_t id, uint32_t deltaTime) {
+    if (id >= MaxTasks || !_tasks[id].callback) return;
+
+    SCHEDULER_CRITICAL_ENTER();
+
+    Task& t = _tasks[id];
+    // An active task already has a deadline, even if it has never executed.
+    // Only a never-scheduled task reads the clock here. Keep this read/add/insert
+    // atomic so ISR scheduling cannot overwrite another deadline increment.
+    uint32_t baseline = (t.timeInitialized || t.active) ? t.scheduledTime : _clock();
+    ScheduleTask(id, baseline + deltaTime);
+
+    SCHEDULER_CRITICAL_EXIT();
+}
+
+template <size_t MaxTasks, size_t MaxDepsPerTask>
+void TaskScheduler<MaxTasks, MaxDepsPerTask>::ScheduleTask(size_t id, uint32_t targetTime) {
     RemoveFromList(id);
 
     _tasks[id].scheduledTime = targetTime;
@@ -45,18 +75,14 @@ void TaskScheduler<MaxTasks, MaxDepsPerTask>::ScheduleTask(size_t id, uint32_t t
         _head = id;
     } else {
         size_t curr = _head;
-        
+
         // Iterate until we find a task scheduled LATER than our target time
-        while (_tasks[curr].next != MaxTasks && 
-               !TimeIsBefore(targetTime, _tasks[_tasks[curr].next].scheduledTime)) {
+        while (_tasks[curr].next != MaxTasks && !TimeIsBefore(targetTime, _tasks[_tasks[curr].next].scheduledTime)) {
             curr = _tasks[curr].next;
         }
         _tasks[id].next = _tasks[curr].next;
         _tasks[curr].next = id;
     }
-
-    // Re-enable interrupts
-    SCHEDULER_CRITICAL_EXIT();
 }
 
 template <size_t MaxTasks, size_t MaxDepsPerTask>
@@ -67,7 +93,9 @@ void TaskScheduler<MaxTasks, MaxDepsPerTask>::SetDependency(size_t id, size_t de
 }
 
 template <size_t MaxTasks, size_t MaxDepsPerTask>
-void TaskScheduler<MaxTasks, MaxDepsPerTask>::Run(uint32_t currentTime) {
+void TaskScheduler<MaxTasks, MaxDepsPerTask>::Run() {
+    // Use one readiness timestamp throughout this pass, even if callbacks take time.
+    const uint32_t currentTime = _clock();
     std::array<bool, MaxTasks> executedInThisRun = {false};
 
     // Repeatedly find the next task ready to run until no more ready tasks exist
@@ -97,6 +125,21 @@ void TaskScheduler<MaxTasks, MaxDepsPerTask>::Run(uint32_t currentTime) {
                 if (depsMet) {
                     readyTask = curr;
                     RemoveFromList(readyTask);
+
+                    // Commit dispatch state before interrupts can schedule this task
+                    // again. Do not clear these fields after leaving the critical section.
+                    t.active = false;
+                    t.next = MaxTasks;
+                    if (!t.timeInitialized) {
+                        // Anchor recurrence to actual first execution, not setup time
+                        // or a deadline delayed by dependencies. Do this before the
+                        // callback so it can immediately reschedule itself with a delta.
+                        t.scheduledTime = _clock();
+                        t.timeInitialized = true;
+                    }
+                    for (size_t i = 0; i < t.requiredDependencies; ++i) {
+                        t.dependencies[i] = false;
+                    }
                     break;
                 }
             }
@@ -113,12 +156,6 @@ void TaskScheduler<MaxTasks, MaxDepsPerTask>::Run(uint32_t currentTime) {
         executedInThisRun[readyTask] = true;
 
         Task& t = _tasks[readyTask];
-        t.active = false;
-        t.next = MaxTasks;
-        for (size_t i = 0; i < t.requiredDependencies; ++i) {
-            t.dependencies[i] = false;
-        }
-
         // Execute the callback
         t.callback();
     }

@@ -1,20 +1,22 @@
 #pragma once
 
-#include <cstdint>
-#include <cstddef>
 #include <array>
+#include <cstddef>
+#include <cstdint>
 #include <optional>
 
 // Mock the interrupt enable/disable for testing purposes
 #ifdef __arm__
-    #include "stm32f1xx_hal.h"
-    #define SCHEDULER_CRITICAL_ENTER() uint32_t primask = __get_PRIMASK(); __disable_irq()
-    #define SCHEDULER_CRITICAL_EXIT()  __set_PRIMASK(primask)
+#include "stm32f1xx_hal.h"
+#define SCHEDULER_CRITICAL_ENTER()      \
+    uint32_t primask = __get_PRIMASK(); \
+    __disable_irq()
+#define SCHEDULER_CRITICAL_EXIT() __set_PRIMASK(primask)
 #else
-    #include <mutex>
-    extern std::mutex test_mutex;
-    #define SCHEDULER_CRITICAL_ENTER() test_mutex.lock()
-    #define SCHEDULER_CRITICAL_EXIT()  test_mutex.unlock()
+#include <mutex>
+extern std::mutex test_mutex;
+#define SCHEDULER_CRITICAL_ENTER() test_mutex.lock()
+#define SCHEDULER_CRITICAL_EXIT() test_mutex.unlock()
 #endif
 
 // A task defines its callback as a generic function pointer
@@ -22,24 +24,34 @@ typedef void (*TaskCallback)();
 
 template <size_t MaxTasks, size_t MaxDepsPerTask>
 class TaskScheduler {
-public:
+  public:
+    using ClockFunction = uint32_t (*)();
+
     struct Task {
         TaskCallback callback = nullptr;
-        // Tasks schedule themselves for certain timestamps
+        // Pending deadline, retained after execution as the baseline for delta scheduling.
         uint32_t scheduledTime = 0;
-        
+        // Set only at first execution; zero is a valid timestamp, not a sentinel.
+        bool timeInitialized = false;
+
         std::array<bool, MaxDepsPerTask> dependencies = {false};
         // The number of required dependencies to check for this task
         // Must be <= `MaxDepsPerTask`; dependencies beyond this number are not checked
-        size_t requiredDependencies = 0; 
-        
+        size_t requiredDependencies = 0;
+
         // Whether the task is scheduled to execute again
         bool active = false;
         // Index of the next task in the linked list
-        size_t next = MaxTasks; 
+        size_t next = MaxTasks;
     };
 
-    TaskScheduler();
+    /**
+     * @brief Stores a timer-agnostic clock without reading it during construction.
+     * @param clock Non-null function returning ticks in the same timebase as targetTime.
+     * Must be fast, nonblocking, and callable from ISRs with interrupts disabled.
+     * Initialize the timer before scheduling or running tasks.
+     */
+    explicit TaskScheduler(ClockFunction clock);
 
     /**
      * @brief Allocates a task to the next available open slot.
@@ -50,12 +62,22 @@ public:
     std::optional<size_t> AddTask(TaskCallback cb, size_t requiredDeps = 0);
 
     /**
-     * @brief Safely sorts a task by execution time into the execution list.
+     * @brief Schedules an absolute deadline, replacing any pending deadline.
      * @param id The id of the task to schedule
      * @param targetTime When the task should attempt to be executed; this is the time
      * that's used to insert the task into the list in its sorted position
      */
-    void ScheduleTask(size_t id, uint32_t targetTime);
+    void ScheduleTaskTargetTime(size_t id, uint32_t targetTime);
+
+    /**
+     * @brief Advances a task's stored deadline by deltaTime.
+     * @param id The id of the task to schedule.
+     * @param deltaTime Interval in ticks of the injected clock.
+     * The first schedule uses clock() + deltaTime. Further calls accumulate, even
+     * before execution. First execution resets the baseline to the actual time;
+     * subsequent executions preserve it so missed intervals can be caught up.
+     */
+    void ScheduleTaskDeltaTime(size_t id, uint32_t deltaTime);
 
     /**
      * @brief Sets the state of a single task dependency.
@@ -66,12 +88,13 @@ public:
     void SetDependency(size_t id, size_t depIndex, bool state);
 
     /**
-     * @brief Runs all ready tasks in a single cycle, evaluating timers and dependencies, 
-     * @param currentTime The time to compare the scheduled time of the tasks against.
+     * @brief Runs ready tasks against one clock sample, at most once per task per call.
+     * First execution samples the clock again to establish that task's baseline.
      */
-    void Run(uint32_t currentTime);
+    void Run();
 
-private:
+  private:
+    ClockFunction _clock;
     std::array<Task, MaxTasks> _tasks;
     volatile size_t _head = MaxTasks;
 
@@ -85,6 +108,12 @@ private:
      * @brief Evaluates true if the current time has reached or passed the scheduled time.
      */
     static inline bool TimeIsReady(uint32_t current, uint32_t scheduled);
+
+    /**
+     * @brief Internal shared helper to set a task's deadline and inserts it into the sorted list.
+     * The caller must validate id and hold the scheduler critical section.
+     */
+    void ScheduleTask(size_t id, uint32_t targetTime);
 
     /**
      * @brief Helper function to remove a task from the linked list of scheduled tasks.
