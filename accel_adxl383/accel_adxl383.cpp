@@ -6,13 +6,7 @@
 #include "stm32f1xx_hal_gpio.h"
 #include "stm32f1xx_hal_spi.h"
 
-extern "C" {
-volatile int16_t x_avg = 0;
-volatile int16_t y_avg = 0;
-volatile int16_t z_avg = 0;
-}
-
-ADXL383::ADXL383(SPI_HandleTypeDef *spi, GPIO_TypeDef *nCS_Port, uint16_t nCS_Pin, uint16_t dataReadyPin): spi(spi), nCS_Port(nCS_Port), nCS_Pin(nCS_Pin), dataReadyPin(dataReadyPin) {
+ADXL383::ADXL383(SPI_HandleTypeDef *spi, GPIO_TypeDef *nCS_Port, uint16_t nCS_Pin, uint16_t dataReadyPin, DataCallback dataCallback): spi(spi), nCS_Port(nCS_Port), nCS_Pin(nCS_Pin), dataReadyPin(dataReadyPin), dataCallback(dataCallback) {
 
 }
 
@@ -40,30 +34,6 @@ bool ADXL383::WriteRegisterBlocking(uint8_t address, uint8_t value) {
     return stat == HAL_OK;
 }
 
-void ADXL383::UpdateAveragesFromFIFO(uint16_t fullSets) {
-    size_t offset = 1;
-    x_avg = static_cast<int16_t>((static_cast<uint16_t>(rxBuffer[offset]) << 8) | rxBuffer[offset + 1]);
-    y_avg = static_cast<int16_t>((static_cast<uint16_t>(rxBuffer[offset + 2]) << 8) | rxBuffer[offset + 3]);
-    z_avg = static_cast<int16_t>((static_cast<uint16_t>(rxBuffer[offset + 4]) << 8) | rxBuffer[offset + 5]);
-}
-
-size_t i = 0;
-HAL_StatusTypeDef reads[100] = {HAL_TIMEOUT, HAL_TIMEOUT, HAL_TIMEOUT, HAL_TIMEOUT, HAL_TIMEOUT, HAL_TIMEOUT, HAL_TIMEOUT, HAL_TIMEOUT, HAL_TIMEOUT};
-uint32_t readscnt = 0;
-
-void ADXL383::ReadRegisterDMA(uint8_t address, size_t cnt) {
-    // Multibyte read
-    txBuffer[0] = static_cast<uint8_t>((address << 1) | 0x01);
-
-    HAL_GPIO_WritePin(nCS_Port, nCS_Pin, GPIO_PIN_RESET);
-    reads[i++] = HAL_SPI_TransmitReceive_DMA(spi, txBuffer, rxBuffer, cnt + 1);
-    if (reads[i - 1] != HAL_OK) {
-        HAL_GPIO_WritePin(nCS_Port, nCS_Pin, GPIO_PIN_SET);
-    }
-
-    readscnt++;
-}
-
 void ADXL383::TxCompleteCallback(SPI_HandleTypeDef *completeSPI) {
     if (completeSPI != spi) return;
 
@@ -74,6 +44,7 @@ void ADXL383::TxCompleteCallback(SPI_HandleTypeDef *completeSPI) {
             state = State::ReadingData;
             break;
         case State::WaitingForReadData:
+            dataNeedsProcessing = true;
             state = State::ClearingWatermark;
             break;
         case State::WaitingForClearedWatermark:
@@ -85,8 +56,6 @@ void ADXL383::TxCompleteCallback(SPI_HandleTypeDef *completeSPI) {
 
 }
 
-uint32_t datas = 0;
-
 void ADXL383::FIFOWatermarkIntCallback(uint16_t pin) {
     if (pin != dataReadyPin) return; // Ensure the correct GPIO interrupt has been called
 
@@ -95,8 +64,6 @@ void ADXL383::FIFOWatermarkIntCallback(uint16_t pin) {
     } else {
         // Do something weird here we shouldn't get here, means we're running too slow
     }
-
-    datas++;
 }
 
 void ADXL383::ProcessTask() {
@@ -120,6 +87,7 @@ void ADXL383::ProcessTask() {
             txBuffer[0] = static_cast<uint8_t>((FIFO_DATA << 1) | 0x01);
 
             uint16_t fullSets = fifoCount / AXES; // Truncation is intentional
+            if (fullSets > FIFO_MAX_SETS) fullSets = FIFO_MAX_SETS;
 
             HAL_GPIO_WritePin(nCS_Port, nCS_Pin, GPIO_PIN_RESET);
             if (HAL_SPI_TransmitReceive_DMA(spi, txBuffer, rxBuffer, 1 + fullSets * AXES * BYTES_PER_AXIS) != HAL_OK) {
@@ -129,10 +97,18 @@ void ADXL383::ProcessTask() {
             break;
         }
         case State::ClearingWatermark:
+            if (dataNeedsProcessing) {
+                uint16_t fullSets = fifoCount / AXES;
+                if (fullSets > FIFO_MAX_SETS) fullSets = FIFO_MAX_SETS;
+                const size_t valueCount = fullSets * AXES;
+                for (size_t i = 0; i < valueCount; ++i) {
+                    const size_t offset = 1 + i * BYTES_PER_AXIS;
+                    fifoValues[i] = static_cast<int16_t>((static_cast<uint16_t>(rxBuffer[offset]) << 8) | rxBuffer[offset + 1]);
+                }
+                dataNeedsProcessing = false;
+                if (dataCallback) dataCallback(fifoValues, valueCount);
+            }
             state = State::WaitingForClearedWatermark;    
-
-            UpdateAveragesFromFIFO(fifoCount / AXES);
-
             memset(txBuffer, 0, READ_SIZE);
             memset(rxBuffer, 0, READ_SIZE);
             txBuffer[0] = static_cast<uint8_t>((STATUS0 << 1) | 0x01);
@@ -212,12 +188,7 @@ bool ADXL383::Init() {
 
     state = State::ReadingDataCount;
     fifoCount = 0;
-    memset(averageBuckets, 0, sizeof(averageBuckets));
-    xSum = ySum = zSum = 0;
-    averageSamples = 0;
-    lastAverageMs = 0;
-    averageStarted = false;
-    x_avg = y_avg = z_avg = 0.0f;
+    dataNeedsProcessing = false;
 
     // Reset
     if (!WriteRegisterBlocking(REG_RESET, resetCode)) return false;

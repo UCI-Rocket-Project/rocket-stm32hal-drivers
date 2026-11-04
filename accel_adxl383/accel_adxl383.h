@@ -15,7 +15,9 @@
 class ADXL383 {
 
 public:
-    ADXL383(SPI_HandleTypeDef *spi, GPIO_TypeDef *nCS_Port, uint16_t nCS_Pin, uint16_t dataReadyPin);
+    using DataCallback = void (*)(const int16_t *values, size_t count);
+
+    ADXL383(SPI_HandleTypeDef *spi, GPIO_TypeDef *nCS_Port, uint16_t nCS_Pin, uint16_t dataReadyPin, DataCallback dataCallback);
     bool Init();
 
     std::optional<uint8_t> ReadRegisterBlocking(uint8_t address);
@@ -30,16 +32,6 @@ public:
     void ProcessTask();
 
 private:
-    void UpdateAveragesFromFIFO(uint16_t fullSets);
-
-    static constexpr uint32_t AverageWindowMs = 1000;
-    struct AverageBucket {
-        int32_t xSum;
-        int32_t ySum;
-        int32_t zSum;
-        uint16_t samples;
-    };
-
     enum class State {
         ReadingDataCount,
         WaitingForDataCount,
@@ -56,18 +48,14 @@ private:
     GPIO_TypeDef *nCS_Port;
     uint16_t nCS_Pin;
     uint16_t dataReadyPin;
+    DataCallback dataCallback;
 
     bool init;
 
     uint8_t txBuffer[READ_SIZE]{};
     uint8_t rxBuffer[READ_SIZE]{};
+    int16_t fifoValues[AXES * FIFO_MAX_SETS]{};
 
     uint16_t fifoCount;
-    AverageBucket averageBuckets[AverageWindowMs]{};
-    int64_t xSum = 0;
-    int64_t ySum = 0;
-    int64_t zSum = 0;
-    uint32_t averageSamples = 0;
-    uint32_t lastAverageMs = 0;
-    bool averageStarted = false;
+    bool dataNeedsProcessing = false;
 };
