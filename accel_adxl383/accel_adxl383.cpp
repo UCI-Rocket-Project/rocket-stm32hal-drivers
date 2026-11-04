@@ -74,7 +74,6 @@ void ADXL383::TxCompleteCallback(SPI_HandleTypeDef *completeSPI) {
             state = State::ReadingData;
             break;
         case State::WaitingForReadData:
-            UpdateAveragesFromFIFO(fifoCount / AXES);
             state = State::ClearingWatermark;
             break;
         case State::WaitingForClearedWatermark:
@@ -131,6 +130,9 @@ void ADXL383::ProcessTask() {
         }
         case State::ClearingWatermark:
             state = State::WaitingForClearedWatermark;    
+
+            UpdateAveragesFromFIFO(fifoCount / AXES);
+
             memset(txBuffer, 0, READ_SIZE);
             memset(rxBuffer, 0, READ_SIZE);
             txBuffer[0] = static_cast<uint8_t>((STATUS0 << 1) | 0x01);
