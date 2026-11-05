@@ -1,6 +1,6 @@
 #include "accel_adxl383.h"
-#include <cstring>
 #include "main.h"
+#include "quick_profile.h"
 #include "stm32f1xx_hal.h"
 #include "stm32f1xx_hal_def.h"
 #include "stm32f1xx_hal_gpio.h"
@@ -36,89 +36,115 @@ bool ADXL383::WriteRegisterBlocking(uint8_t address, uint8_t value) {
 
 void ADXL383::TxCompleteCallback(SPI_HandleTypeDef *completeSPI) {
     if (completeSPI != spi) return;
+    const uint32_t callbackStart = DWT->CYCCNT;
 
     HAL_GPIO_WritePin(nCS_Port, nCS_Pin, GPIO_PIN_SET);
     switch (state) {
         case State::WaitingForDataCount:
+            ProfileRecord(quickProfile.countDma, quickProfile.dmaStartCycles);
             fifoCount = rxBuffer[1] | ((rxBuffer[2] & 0x01) << 8);
             state = State::ReadingData;
             break;
         case State::WaitingForReadData:
+            ProfileRecord(quickProfile.dataDma, quickProfile.dmaStartCycles);
+            quickProfile.dataDoneCycles = DWT->CYCCNT;
             dataNeedsProcessing = true;
             state = State::ClearingWatermark;
             break;
         case State::WaitingForClearedWatermark:
+            ProfileRecord(quickProfile.clearDma, quickProfile.dmaStartCycles);
+            ProfileRecord(quickProfile.irqToClearDone, quickProfile.irqStartCycles);
             state = State::Idle;
             break;
         default:
             break;
     }
+    ProfileRecord(quickProfile.spiCallback, callbackStart);
 
 }
 
+int datas = 0;
+
 void ADXL383::FIFOWatermarkIntCallback(uint16_t pin) {
     if (pin != dataReadyPin) return; // Ensure the correct GPIO interrupt has been called
+    const uint32_t start = DWT->CYCCNT;
+
+    datas++;
 
     if (state == State::Idle) {
+        quickProfile.irqStartCycles = start;
         state = State::ReadingDataCount;
     } else {
+        ++quickProfile.busyWatermarkIrqs;
+        ProfileRecord(quickProfile.watermarkIsr, start);
+        ProfileCalculateAverages();
+        __BKPT(0);
         // Do something weird here we shouldn't get here, means we're running too slow
+        return;
     }
+    ProfileRecord(quickProfile.watermarkIsr, start);
 }
 
 void ADXL383::ProcessTask() {
     switch (state) {
-        case State::ReadingDataCount:
+        case State::ReadingDataCount: {
+            const uint32_t start = DWT->CYCCNT;
+            ProfileRecord(quickProfile.irqToCountStart, quickProfile.irqStartCycles);
             state = State::WaitingForDataCount;
-            memset(txBuffer, 0, READ_SIZE);
-            memset(rxBuffer, 0, READ_SIZE);
             txBuffer[0] = static_cast<uint8_t>((FIFO_STATUS0 << 1) | 0x01);
 
+            quickProfile.dmaStartCycles = DWT->CYCCNT;
             HAL_GPIO_WritePin(nCS_Port, nCS_Pin, GPIO_PIN_RESET);
             if (HAL_SPI_TransmitReceive_DMA(spi, txBuffer, rxBuffer, 4) != HAL_OK) {
                 HAL_GPIO_WritePin(nCS_Port, nCS_Pin, GPIO_PIN_SET);
                 state = State::ReadingDataCount;
             }
+            ProfileRecord(quickProfile.countSetup, start);
             break;
+        }
         case State::ReadingData: {
+            const uint32_t start = DWT->CYCCNT;
             state = State::WaitingForReadData;    
-            memset(txBuffer, 0, READ_SIZE);
-            memset(rxBuffer, 0, READ_SIZE);
             txBuffer[0] = static_cast<uint8_t>((FIFO_DATA << 1) | 0x01);
 
             uint16_t fullSets = fifoCount / AXES; // Truncation is intentional
             if (fullSets > FIFO_MAX_SETS) fullSets = FIFO_MAX_SETS;
 
+            quickProfile.dmaStartCycles = DWT->CYCCNT;
             HAL_GPIO_WritePin(nCS_Port, nCS_Pin, GPIO_PIN_RESET);
             if (HAL_SPI_TransmitReceive_DMA(spi, txBuffer, rxBuffer, 1 + fullSets * AXES * BYTES_PER_AXIS) != HAL_OK) {
                 HAL_GPIO_WritePin(nCS_Port, nCS_Pin, GPIO_PIN_SET);
                 state = State::ReadingData;
             }
+            ProfileRecord(quickProfile.dataSetup, start);
             break;
         }
-        case State::ClearingWatermark:
-            if (dataNeedsProcessing) {
-                uint16_t fullSets = fifoCount / AXES;
-                if (fullSets > FIFO_MAX_SETS) fullSets = FIFO_MAX_SETS;
-                const size_t valueCount = fullSets * AXES;
-                for (size_t i = 0; i < valueCount; ++i) {
-                    const size_t offset = 1 + i * BYTES_PER_AXIS;
-                    fifoValues[i] = static_cast<int16_t>((static_cast<uint16_t>(rxBuffer[offset]) << 8) | rxBuffer[offset + 1]);
-                }
-                dataNeedsProcessing = false;
-                if (dataCallback) dataCallback(fifoValues, valueCount);
-            }
+        case State::ClearingWatermark: {
+            const uint32_t start = DWT->CYCCNT;
+            ProfileRecord(quickProfile.dataDoneToClearStart, quickProfile.dataDoneCycles);
+            // if (dataNeedsProcessing) {
+                // volatile uint16_t fullSets = fifoCount / AXES;
+                // if (fullSets > FIFO_MAX_SETS) fullSets = FIFO_MAX_SETS;
+                // const size_t valueCount = fullSets * AXES;
+                // for (size_t i = 0; i < valueCount; ++i) {
+                //     const size_t offset = 1 + i * BYTES_PER_AXIS;
+                //     fifoValues[i] = static_cast<int16_t>((static_cast<uint16_t>(rxBuffer[offset]) << 8) | rxBuffer[offset + 1]);
+                // }
+                // dataNeedsProcessing = false;
+                // if (dataCallback) dataCallback(fifoValues, valueCount);
+            // }
             state = State::WaitingForClearedWatermark;    
-            memset(txBuffer, 0, READ_SIZE);
-            memset(rxBuffer, 0, READ_SIZE);
             txBuffer[0] = static_cast<uint8_t>((STATUS0 << 1) | 0x01);
 
+            quickProfile.dmaStartCycles = DWT->CYCCNT;
             HAL_GPIO_WritePin(nCS_Port, nCS_Pin, GPIO_PIN_RESET);
             if (HAL_SPI_TransmitReceive_DMA(spi, txBuffer, rxBuffer, 2) != HAL_OK) {
                 HAL_GPIO_WritePin(nCS_Port, nCS_Pin, GPIO_PIN_SET);
                 state = State::ClearingWatermark;
             }
+            ProfileRecord(quickProfile.clearSetup, start);
             break;
+        }
         default:
             break;
     }
@@ -186,7 +212,7 @@ bool ADXL383::Init() {
 
     init = false;
 
-    state = State::ReadingDataCount;
+    state = State::Idle;
     fifoCount = 0;
     dataNeedsProcessing = false;
 
@@ -207,6 +233,7 @@ bool ADXL383::Init() {
     }
 
     HAL_Delay(2); // DS mandated 2 ms wait before reading can commence
+    // lowk this might not be needed check
 
     init = true;
 

@@ -52,8 +52,10 @@ private:
 
     bool init;
 
+    // DMA reads change only byte 0. The remaining zero-initialized bytes supply
+    // zero dummy bytes for every transfer, including the 4-byte count read.
     uint8_t txBuffer[READ_SIZE]{};
-    uint8_t rxBuffer[READ_SIZE]{};
+    uint8_t rxBuffer[READ_SIZE]; // DMA overwrites every byte that is read.
     int16_t fifoValues[AXES * FIFO_MAX_SETS]{};
 
     uint16_t fifoCount;
