@@ -17,10 +17,11 @@ class ADXL383 {
 
 public:
     using DataCallback = void (*)(const int16_t *values, size_t count);
+    using RecoveryCallback = void (*)();
     using Time10usCounter = uint32_t (*)();
 
     ADXL383(SPI_HandleTypeDef *spi, GPIO_TypeDef *nCS_Port, uint16_t nCS_Pin,
-            uint16_t dataReadyPin, DataCallback dataCallback,
+            uint16_t dataReadyPin, DataCallback dataCallback, RecoveryCallback recoveryCallback,
             Time10usCounter getCurrentTime10us);
     bool Init();
 
@@ -68,7 +69,10 @@ private:
     uint16_t nCS_Pin;
     uint16_t dataReadyPin;
     DataCallback dataCallback;
+    RecoveryCallback recoveryCallback;
     Time10usCounter getCurrentTime10us;
+
+    void BeginRecovery();
 
     bool init;
 

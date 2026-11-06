@@ -6,11 +6,20 @@
 #include "stm32f1xx_hal_spi.h"
 
 ADXL383::ADXL383(SPI_HandleTypeDef *spi, GPIO_TypeDef *nCS_Port, uint16_t nCS_Pin,
-                 uint16_t dataReadyPin, DataCallback dataCallback,
+                 uint16_t dataReadyPin, DataCallback dataCallback, RecoveryCallback recoveryCallback,
                  Time10usCounter getCurrentTime10us)
     : spi(spi), nCS_Port(nCS_Port), nCS_Pin(nCS_Pin), dataReadyPin(dataReadyPin),
-      dataCallback(dataCallback), getCurrentTime10us(getCurrentTime10us) {
+      dataCallback(dataCallback), recoveryCallback(recoveryCallback),
+      getCurrentTime10us(getCurrentTime10us) {
 
+}
+
+void ADXL383::BeginRecovery() {
+    recovering = true;
+    ++readRate.recoveryCount;
+    recoveryRequested = false;
+    state = State::EnteringStandby;
+    if (recoveryCallback) recoveryCallback();
 }
 
 std::optional<uint8_t> ADXL383::ReadRegisterBlocking(uint8_t address) {
@@ -43,10 +52,7 @@ void ADXL383::TxCompleteCallback(SPI_HandleTypeDef *completeSPI) {
 
     // Deal with FIFO Fault
     if (recoveryRequested && !recovering) {
-        recovering = true;
-        ++readRate.recoveryCount;
-        recoveryRequested = false;
-        state = State::EnteringStandby;
+        BeginRecovery();
         return;
     }
 
@@ -107,10 +113,7 @@ void ADXL383::ProcessTask() {
         state == State::ClearingWatermark;
 
     if (recoveryRequested && !recovering && betweenTransfers) {
-        recovering = true;
-        ++readRate.recoveryCount;
-        recoveryRequested = false;
-        state = State::EnteringStandby;
+        BeginRecovery();
     }
 
     switch (state) {
@@ -162,14 +165,12 @@ void ADXL383::ProcessTask() {
                 previousDataReadTime10us = readTime10us;
                 hasPreviousDataRead = true;
 
-                // volatile uint16_t fullSets = fifoCount / AXES;
-                // if (fullSets > FIFO_MAX_SETS) fullSets = FIFO_MAX_SETS;
-                // const size_t valueCount = fullSets * AXES;
-                // for (size_t i = 0; i < valueCount; ++i) {
-                //     const size_t offset = 1 + i * BYTES_PER_AXIS;
-                //     fifoValues[i] = static_cast<int16_t>((static_cast<uint16_t>(rxBuffer[offset]) << 8) | rxBuffer[offset + 1]);
-                // }
-                // if (dataCallback) dataCallback(fifoValues, valueCount);
+                const size_t valueCount = fullSets * AXES;
+                for (size_t i = 0; i < valueCount; ++i) {
+                    const size_t offset = 1 + i * BYTES_PER_AXIS;
+                    fifoValues[i] = static_cast<int16_t>((static_cast<uint16_t>(rxBuffer[offset]) << 8) | rxBuffer[offset + 1]);
+                }
+                if (dataCallback) dataCallback(fifoValues, valueCount);
             }
             state = State::WaitingForClearedWatermark;    
             txBuffer[0] = static_cast<uint8_t>((STATUS0 << 1) | 0x01);
