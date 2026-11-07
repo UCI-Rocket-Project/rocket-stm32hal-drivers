@@ -529,7 +529,17 @@ void W25N01GV::ProcessTask() {
             return;
         }
         if (!IoSucceeded()) { Finish(ioResult_); return; }
-        if (!IsBadBlock() && CheckpointValid(scanBlock_)) {
+        if (!IsBadBlock() && rxPage_[1] == CheckpointMagic[0] &&
+            rxPage_[2] == CheckpointMagic[1] &&
+            rxPage_[3] == CheckpointMagic[2]) {
+            if (rxPage_[4] != FormatVersion) {
+                Finish(Result::IncompatibleFormat);
+                return;
+            }
+            if (!CheckpointValid(scanBlock_)) {
+                Finish(Result::CheckpointFailed);
+                return;
+            }
             if (activeBlock_ == BlockCount) activeBlock_ = scanBlock_;
             firstBlock_ = scanBlock_;
         }

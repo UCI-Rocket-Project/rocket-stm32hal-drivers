@@ -13,12 +13,12 @@ public:
     static constexpr uint8_t PagesPerBlock = 64;
     static constexpr size_t PageBytes = 2048;
     static constexpr size_t PayloadBytes = 2043;
-    static constexpr uint8_t FormatVersion = 1;
+    static constexpr uint8_t FormatVersion = 2;
 
     enum class Result : uint8_t {
         Ok, Pending, EndOfLog, Full, NotConnected, NotMounted, Busy,
         BadArgument, SpiError, Timeout, WrongDevice, ConfigurationError,
-        EraseFailed, ProgramFailed, CheckpointFailed
+        EraseFailed, ProgramFailed, CheckpointFailed, IncompatibleFormat
     };
 
     enum class Operation : uint8_t { None, Mount, Format, Append, ReadNext };

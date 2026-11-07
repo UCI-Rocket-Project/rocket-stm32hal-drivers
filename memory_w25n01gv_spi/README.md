@@ -54,18 +54,29 @@ session; after a power cycle, mount treats any page with a programmed main-area
 bit as occupied. A failed checkpoint must be erased before reuse. SPI/DMA
 errors or timeouts stop new transactions until reset/reconnection.
 
-## On-flash format, version 1
+## On-flash format, version 2
 
 - 1024 physical blocks; 64 pages per block; 2048 main-area bytes per page.
 - A factory bad block has page 0 byte 0 different from `FF`; the driver skips
   it and never erases it. This version does not inspect the spare-area marker.
-- A good block's page 0 has byte 0 = `FF`; bytes 1..3 = `UCI`, byte 4 = `01`,
+- A good block's page 0 has byte 0 = `FF`; bytes 1..3 = `UCI`, byte 4 = `02`,
   bytes 5..6 = physical block number (big endian), bytes 7..10 = `00000000`,
   and all other main-area bytes = `FF`.
 - Each data page has byte 0 = `00`, bytes 1..2043 = exactly 2043 payload
   bytes, and bytes 2044..2047 = `00000000`.
+- The AMI accelerometer payload stores a little-endian 32-bit timestamp in
+  10 us ticks at page bytes 1..4, followed by 339 little-endian signed XYZ
+  triples (6 bytes each) at bytes 5..2038. Bytes 2039..2043 are `FF` padding.
+  The timestamp is sampled when the first XYZ triple enters the page; it is
+  relative to boot, not a persistent wall clock.
 - CRC fields are reserved: new writes store zero and reads ignore them,
   including when reading pages written by the previous CRC-enabled driver.
+
+Version 1 checkpoints are not mounted as version 2. Erase/format the flash
+before recording new pages with this layout; export any version 1 log first.
+Mount reports `IncompatibleFormat` if it finds a `UCI` checkpoint with another
+version, or `CheckpointFailed` if a version 2 checkpoint is malformed. This
+prevents an older log from being silently treated as empty.
 
 Page 0 is the checkpoint; data pages are programmed once, in ascending order
 from 1 to 63. The driver uses the chip's ECC and skips data pages with an
