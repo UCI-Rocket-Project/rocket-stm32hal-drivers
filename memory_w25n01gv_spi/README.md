@@ -3,7 +3,7 @@
 `W25N01GV` matches the project's cooperative driver pattern: `ConnectBlocking()`
 does the short boot-time reset, JEDEC ID check, and status-register setup; all
 other flash work runs in `ProcessTask()`. The controller schedules it every
-100 µs. Every post-connect SPI transaction, including a one-byte command or
+1 ms. Every post-connect SPI transaction, including a one-byte command or
 status poll, uses SPI TX/RX DMA. DMA and SPI error callbacks set flags only;
 chip select and the state machine change in `ProcessTask()`.
 
@@ -32,8 +32,9 @@ auto connected = flash.ConnectBlocking();
 if (connected == W25N01GV::Result::Ok) flash.MountAsync(onComplete, context);
 // Call flash.ProcessTask() periodically until flash.Mounted() is true.
 
-uint8_t payload[W25N01GV::PayloadBytes];
-flash.AppendPageAsync(payload, onComplete, context); // copies payload now
+alignas(4) uint8_t page[W25N01GV::PageBytes];
+// Set page[0] = 0, payload bytes 1..2043, and bytes 2044..2047 = 0.
+flash.AppendPageAsync(page, onComplete, context); // keep page unchanged until success
 
 uint8_t output[W25N01GV::PayloadBytes];
 flash.RewindReadCursor();
@@ -42,6 +43,8 @@ flash.ReadNextPageAsync(output, onComplete, context); // keep output alive
 
 Only one operation may run at a time. An accepted call returns `Pending`; its
 callback runs in `ProcessTask()` and reports `Ok`, `EndOfLog`, or an error.
+After a DMA timeout or SPI error, keep the submitted page unchanged until the
+peripheral or board is reset, because the DMA may still reference it.
 Polling `Busy()` and `LastResult()` also works. `FormatAsync()` erases every
 good block whose page 0 contains programmed main-area bits, then leaves an
 empty mounted log. On startup, `MountAsync()` scans checkpoint pages backwards,
@@ -57,16 +60,16 @@ errors or timeouts stop new transactions until reset/reconnection.
 - A factory bad block has page 0 byte 0 different from `FF`; the driver skips
   it and never erases it. This version does not inspect the spare-area marker.
 - A good block's page 0 has byte 0 = `FF`; bytes 1..3 = `UCI`, byte 4 = `01`,
-  bytes 5..6 = physical block number (big endian), bytes 7..10 = CRC-32 of
-  bytes 1..6 (big endian), and all other main-area bytes = `FF`.
+  bytes 5..6 = physical block number (big endian), bytes 7..10 = `00000000`,
+  and all other main-area bytes = `FF`.
 - Each data page has byte 0 = `00`, bytes 1..2043 = exactly 2043 payload
-  bytes, and bytes 2044..2047 = CRC-32 of bytes 0..2043 (big endian).
-- CRC-32 uses the IEEE reflected polynomial `EDB88320`, initial value
-  `FFFFFFFF`, and final XOR `FFFFFFFF`.
+  bytes, and bytes 2044..2047 = `00000000`.
+- CRC fields are reserved: new writes store zero and reads ignore them,
+  including when reading pages written by the previous CRC-enabled driver.
 
 Page 0 is the checkpoint; data pages are programmed once, in ascending order
 from 1 to 63. The driver uses the chip's ECC and skips data pages with an
-uncorrectable ECC status or invalid CRC. It has no wear leveling or reclaim
+uncorrectable ECC status. It has no wear leveling or reclaim
 scheme; when all usable blocks are consumed, append returns `Full`. A
 power-interrupted format can leave old checkpoints; rerun `FormatAsync()` to
 complete a requested erase. This test-board format considers only the 2048

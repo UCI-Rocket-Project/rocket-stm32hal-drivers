@@ -40,13 +40,15 @@ public:
     Result MountAsync(Completion completion = nullptr, void *context = nullptr);
     Result FormatAsync(Completion completion = nullptr, void *context = nullptr);
 
-    // Copies exactly PayloadBytes from payload before returning. The driver
-    // creates a 2048-byte data page with marker and CRC, then appends it.
-    Result AppendPageAsync(const uint8_t *payload, Completion completion = nullptr,
+    // Appends a caller-owned 2048-byte page. Byte 0 must be 00; bytes
+    // 2044..2047 must be zero. Keep the page unchanged until success; after
+    // Timeout or SpiError, keep it unchanged until the DMA/peripheral is reset.
+    // DMA reads it directly, including after an erase/checkpoint sequence.
+    Result AppendPageAsync(const uint8_t *page, Completion completion = nullptr,
                            void *context = nullptr);
 
     // Reads the next valid record into output[PayloadBytes]. Keep output alive
-    // until the callback. Occupied pages with bad CRC/ECC are skipped. A call
+    // until the callback. Occupied pages with uncorrectable ECC are skipped. A call
     // returning EndOfLog does not invoke the callback; Pending does.
     Result ReadNextPageAsync(uint8_t *output, Completion completion = nullptr,
                              void *context = nullptr);
@@ -108,12 +110,12 @@ private:
     uint16_t targetBlock_ = 0;
     uint8_t targetPage_ = 0;
 
-    // DMA uses stable member storage throughout each transaction. txPage_ is
-    // the page being programmed or an all-FF read clock source; rxPage_ stores
-    // the read result. Status/command transfers use small member buffers.
+    // txPage_ holds checkpoints or all-FF read clocks. Data-page DMA reads
+    // appendPage_, which the caller owns until the append completes.
     alignas(4) uint8_t txPage_[PageBytes]{};
     alignas(4) uint8_t rxPage_[PageBytes]{};
-    uint8_t payload_[PayloadBytes]{};
+    const uint8_t *appendPage_ = nullptr;
+    const uint8_t *programPage_ = nullptr;
     alignas(4) uint8_t txSmall_[4]{};
     alignas(4) uint8_t rxSmall_[4]{};
     Io io_ = Io::Idle;
@@ -148,11 +150,7 @@ private:
     bool CheckpointValid(uint16_t block) const;
     bool DataPageValid() const;
     void MakeCheckpoint(uint16_t block);
-    void MakeDataPage(const uint8_t *payload);
     void AdvanceReadCursor();
-    static uint32_t Crc32(const uint8_t *data, size_t size);
-    static void PutU32BE(uint8_t *dst, uint32_t value);
-    static uint32_t GetU32BE(const uint8_t *src);
 
     bool BlockingTransfer(const uint8_t *tx, uint8_t *rx, uint16_t count);
     bool BlockingCommand(const uint8_t *bytes, uint16_t count);

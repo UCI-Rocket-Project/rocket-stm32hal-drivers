@@ -146,6 +146,8 @@ void W25N01GV::Finish(Result result) {
     completion_ = nullptr;
     completionContext_ = nullptr;
     readOutput_ = nullptr;
+    appendPage_ = nullptr;
+    programPage_ = nullptr;
     lastResult_ = result;
     if (callback) callback(finished, result, block, page, context);
 }
@@ -177,19 +179,19 @@ W25N01GV::Result W25N01GV::FormatAsync(Completion completion, void *context) {
     return Result::Pending;
 }
 
-W25N01GV::Result W25N01GV::AppendPageAsync(const uint8_t *payload,
+W25N01GV::Result W25N01GV::AppendPageAsync(const uint8_t *page,
                                             Completion completion, void *context) {
     if (!connected_) return Result::NotConnected;
     if (!spi_->hdmarx || !spi_->hdmatx) return Result::ConfigurationError;
     if (!mounted_) return Result::NotMounted;
     if (Busy()) return Result::Busy;
-    if (!payload) return Result::BadArgument;
+    if (!page || page[0] != 0 || page[2044] != 0 || page[2045] != 0 ||
+        page[2046] != 0 || page[2047] != 0) return Result::BadArgument;
     if (nextBlock_ >= BlockCount) return Result::Full;
-    std::memcpy(payload_, payload, PayloadBytes);
+    appendPage_ = page;
     targetBlock_ = nextBlock_;
     targetPage_ = nextPage_;
     if (activeBlock_ == nextBlock_ && nextPage_ < PagesPerBlock) {
-        MakeDataPage(payload_);
         Begin(Operation::Append, Phase::AppendData, completion, context);
         StartProgram(nextBlock_, nextPage_);
     } else {
@@ -263,7 +265,8 @@ bool W25N01GV::TransferPage(bool writing, bool holdCs) {
     releaseCsAfterDma_ = !holdCs;
     dmaStartMs_ = HAL_GetTick();
     dmaActive_ = true;
-    if (HAL_SPI_TransmitReceive_DMA(spi_, txPage_, rxPage_, PageBytes) == HAL_OK) return true;
+    uint8_t *const source = writing ? const_cast<uint8_t *>(programPage_) : txPage_;
+    if (HAL_SPI_TransmitReceive_DMA(spi_, source, rxPage_, PageBytes) == HAL_OK) return true;
     dmaActive_ = false;
     EndTransaction();
     return false;
@@ -302,6 +305,7 @@ void W25N01GV::StartProgram(uint16_t block, uint8_t page) {
     io_ = Io::Program;
     ioStage_ = IoStage::WriteEnable;
     ioResult_ = Result::Pending;
+    programPage_ = page == 0 ? txPage_ : appendPage_;
     HAL_GPIO_WritePin(wpPort_, wpPin_, GPIO_PIN_SET);
 }
 
@@ -481,29 +485,6 @@ bool W25N01GV::PageOccupied() const {
     return false;
 }
 
-uint32_t W25N01GV::Crc32(const uint8_t *data, size_t size) {
-    uint32_t crc = 0xFFFFFFFFu;
-    for (size_t i = 0; i < size; ++i) {
-        crc ^= data[i];
-        for (unsigned bit = 0; bit < 8; ++bit)
-            crc = (crc >> 1) ^ ((crc & 1u) ? 0xEDB88320u : 0u);
-    }
-    return ~crc;
-}
-
-void W25N01GV::PutU32BE(uint8_t *dst, uint32_t value) {
-    dst[0] = static_cast<uint8_t>(value >> 24);
-    dst[1] = static_cast<uint8_t>(value >> 16);
-    dst[2] = static_cast<uint8_t>(value >> 8);
-    dst[3] = static_cast<uint8_t>(value);
-}
-
-uint32_t W25N01GV::GetU32BE(const uint8_t *src) {
-    return (static_cast<uint32_t>(src[0]) << 24) |
-           (static_cast<uint32_t>(src[1]) << 16) |
-           (static_cast<uint32_t>(src[2]) << 8) | src[3];
-}
-
 void W25N01GV::MakeCheckpoint(uint16_t block) {
     std::memset(txPage_, 0xFF, PageBytes);
     txPage_[1] = CheckpointMagic[0];
@@ -512,7 +493,7 @@ void W25N01GV::MakeCheckpoint(uint16_t block) {
     txPage_[4] = FormatVersion;
     txPage_[5] = static_cast<uint8_t>(block >> 8);
     txPage_[6] = static_cast<uint8_t>(block);
-    PutU32BE(txPage_ + 7, Crc32(txPage_ + 1, 6));
+    std::memset(txPage_ + 7, 0, 4);
 }
 
 bool W25N01GV::CheckpointValid(uint16_t block) const {
@@ -522,19 +503,11 @@ bool W25N01GV::CheckpointValid(uint16_t block) const {
         rxPage_[3] == CheckpointMagic[2] &&
         rxPage_[4] == FormatVersion &&
         rxPage_[5] == static_cast<uint8_t>(block >> 8) &&
-        rxPage_[6] == static_cast<uint8_t>(block) &&
-        GetU32BE(rxPage_ + 7) == Crc32(rxPage_ + 1, 6);
-}
-
-void W25N01GV::MakeDataPage(const uint8_t *payload) {
-    txPage_[0] = 0;
-    std::memcpy(txPage_ + 1, payload, PayloadBytes);
-    PutU32BE(txPage_ + 2044, Crc32(txPage_, 2044));
+        rxPage_[6] == static_cast<uint8_t>(block);
 }
 
 bool W25N01GV::DataPageValid() const {
-    return !ioEccBad_ && rxPage_[0] == 0 &&
-           GetU32BE(rxPage_ + 2044) == Crc32(rxPage_, 2044);
+    return !ioEccBad_ && rxPage_[0] == 0;
 }
 
 void W25N01GV::AdvanceReadCursor() {
@@ -669,7 +642,6 @@ void W25N01GV::ProcessTask() {
         nextPage_ = 1;
         targetBlock_ = activeBlock_;
         targetPage_ = nextPage_;
-        MakeDataPage(payload_);
         phase_ = Phase::AppendData;
         StartProgram(activeBlock_, nextPage_);
         return;
