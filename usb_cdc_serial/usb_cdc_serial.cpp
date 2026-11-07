@@ -12,6 +12,7 @@ volatile uint8_t usbVbusHigh = 0;
 volatile uint8_t usbVbusGpioHigh = 0;
 volatile uint32_t usbVbusDetaches = 0;
 volatile uint32_t usbVbusAttaches = 0;
+volatile uint32_t usbVbusSenseFailures = 0;
 
 UsbCdcSerial::UsbCdcSerial() {
     activeSerial = this;
@@ -59,37 +60,72 @@ bool UsbCdcSerial::Write(const uint8_t *data, size_t length) {
 }
 
 void UsbCdcSerial::ProcessVbus() {
-    if (!vbusInitialized_) {
-        // Cube's F1 USB LL enables VBUSBSEN unconditionally. This board uses
-        // a 33k/82k divider intended for GPIO sensing, so release PA9 from
-        // the peripheral sensor before sampling it as an input.
+    const uint32_t now = HAL_GetTick();
+    if (vbusState_ == VbusState::Startup) {
+        // Cube's F1 USB LL enables VBUSBSEN unconditionally. Release PA9 so
+        // the board's VBUS divider can be sampled while USB is disconnected.
         HAL_NVIC_DisableIRQ(OTG_FS_IRQn);
         HAL_PCD_DevDisconnect(&hpcd_USB_OTG_FS);
         USBD_LL_DevDisconnected(&hUsbDeviceFS);
         USB_OTG_FS->GCCFG &= ~USB_OTG_GCCFG_VBUSBSEN;
         HAL_NVIC_EnableIRQ(OTG_FS_IRQn);
-        vbusInitialized_ = true;
+        vbusState_ = VbusState::Detached;
         vbusSampleHigh_ = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_9) == GPIO_PIN_SET;
-        vbusChangedMs_ = HAL_GetTick();
-    }
-
-    const bool high = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_9) == GPIO_PIN_SET;
-    usbVbusHigh = (USB_OTG_FS->GOTGCTL & USB_OTG_GOTGCTL_BSVLD) != 0;
-    usbVbusGpioHigh = high;
-    const uint32_t now = HAL_GetTick();
-    if (high != vbusSampleHigh_) {
-        vbusSampleHigh_ = high;
         vbusChangedMs_ = now;
     }
-    if (high == usbAttached_ || now - vbusChangedMs_ < VbusDebounceMs) return;
 
-    // USB callbacks may also tear down CDC on cable removal. Keep the stack
-    // transition out of IRQ context and exclude a concurrent USB callback.
+    const bool gpioHigh = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_9) == GPIO_PIN_SET;
+    const bool bSessionValid = (USB_OTG_FS->GOTGCTL & USB_OTG_GOTGCTL_BSVLD) != 0;
+    usbVbusHigh = bSessionValid;
+    usbVbusGpioHigh = gpioHigh;
+
+    if (vbusState_ == VbusState::Detached || vbusState_ == VbusState::Failed) {
+        if (gpioHigh != vbusSampleHigh_) {
+            vbusSampleHigh_ = gpioHigh;
+            vbusChangedMs_ = now;
+        }
+        if (vbusState_ == VbusState::Failed) {
+            if (!gpioHigh && now - vbusChangedMs_ >= VbusDebounceMs)
+                vbusState_ = VbusState::Detached;
+            return;
+        }
+        if (!gpioHigh || now - vbusChangedMs_ < VbusDebounceMs) return;
+        // The F105 gates its internal D+ pull-up on hardware B-session valid.
+        // Only enable the hardware sensor after GPIO confirms VBUS is present.
+        USB_OTG_FS->GCCFG |= USB_OTG_GCCFG_VBUSBSEN;
+        vbusState_ = VbusState::CheckingHardware;
+        vbusChangedMs_ = now;
+        return;
+    }
+
+    if (vbusState_ == VbusState::CheckingHardware) {
+        if (bSessionValid) {
+            HAL_NVIC_DisableIRQ(OTG_FS_IRQn);
+            HAL_PCD_DevConnect(&hpcd_USB_OTG_FS);
+            HAL_NVIC_EnableIRQ(OTG_FS_IRQn);
+            usbAttached_ = true;
+            ++usbVbusAttaches;
+            vbusState_ = VbusState::Attached;
+            return;
+        }
+        if (now - vbusChangedMs_ < VbusDebounceMs) return;
+        USB_OTG_FS->GCCFG &= ~USB_OTG_GCCFG_VBUSBSEN;
+        ++usbVbusSenseFailures;
+        vbusState_ = VbusState::Failed;
+        vbusSampleHigh_ = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_9) == GPIO_PIN_SET;
+        vbusChangedMs_ = now;
+        return;
+    }
+
+    if (bSessionValid) {
+        vbusChangedMs_ = now;
+        return;
+    }
+    if (now - vbusChangedMs_ < VbusDebounceMs) return;
+    // USB callbacks can also tear down CDC. Keep the stack transition out of
+    // IRQ context and exclude a concurrent USB callback.
     HAL_NVIC_DisableIRQ(OTG_FS_IRQn);
-    if (high) {
-        HAL_PCD_DevConnect(&hpcd_USB_OTG_FS);
-        ++usbVbusAttaches;
-    } else {
+    if (usbAttached_) {
         HAL_PCD_DevDisconnect(&hpcd_USB_OTG_FS);
         USBD_LL_DevDisconnected(&hUsbDeviceFS);
         txData_ = nullptr;
@@ -97,7 +133,11 @@ void UsbCdcSerial::ProcessVbus() {
         rxTail_ = rxHead_;
         ++usbVbusDetaches;
     }
-    usbAttached_ = high;
+    USB_OTG_FS->GCCFG &= ~USB_OTG_GCCFG_VBUSBSEN;
+    usbAttached_ = false;
+    vbusState_ = VbusState::Detached;
+    vbusSampleHigh_ = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_9) == GPIO_PIN_SET;
+    vbusChangedMs_ = now;
     HAL_NVIC_EnableIRQ(OTG_FS_IRQn);
 }
 

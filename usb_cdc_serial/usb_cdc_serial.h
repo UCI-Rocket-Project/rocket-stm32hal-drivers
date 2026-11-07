@@ -18,12 +18,13 @@ public:
     uint32_t RxOverflows() const { return rxOverflows_; }
 
 private:
+    enum class VbusState : uint8_t { Startup, Detached, CheckingHardware, Attached, Failed };
     static constexpr uint16_t RxCapacity = 256;
     static constexpr size_t TxChunkBytes = 256;
     static constexpr uint32_t VbusDebounceMs = 10;
     void ProcessVbus();
+    VbusState vbusState_ = VbusState::Startup;
     bool vbusSampleHigh_ = false;
-    bool vbusInitialized_ = false;
     bool usbAttached_ = false;
     uint32_t vbusChangedMs_ = 0;
     uint8_t rx_[RxCapacity]{};

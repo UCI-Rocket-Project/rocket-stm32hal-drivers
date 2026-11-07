@@ -97,8 +97,9 @@ priority 0. The driver does not edit the IOC or HAL-generated interrupt code.
 USB VBUS is wired through a 33 kΩ/82 kΩ divider to PA9. Configure PA9 as a
 GPIO input without a pull in CubeMX, and disable the USB peripheral's hardware
 VBUS sensing option if CubeMX exposes it. The F1 USB LL currently enables
-`VBUSBSEN` regardless of that option, so the driver clears it once after USB
-startup and uses PA9 GPIO to debounce cable attachment. This is a board-level
-experiment: on the STM32F105, the internal D+ pull-up may still depend on
-hardware B-session detection. If PA9 rises on replug but the host does not
-enumerate, the VBUS circuit needs a hardware change.
+`VBUSBSEN` regardless of that option. The driver clears it while detached,
+uses PA9 GPIO to debounce cable attachment, then enables the hardware sensor
+to request the F105's internal D+ pull-up. It waits for hardware B-session
+valid before marking USB attached. `usbVbusSenseFailures` counts attempts
+where PA9 saw the cable but the hardware sensor did not report B-session
+valid. If this count rises, the VBUS circuit needs a hardware change.
