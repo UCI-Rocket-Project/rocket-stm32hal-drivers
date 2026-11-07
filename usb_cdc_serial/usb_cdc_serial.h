@@ -20,6 +20,12 @@ public:
 private:
     static constexpr uint16_t RxCapacity = 256;
     static constexpr size_t TxChunkBytes = 256;
+    static constexpr uint32_t VbusDebounceMs = 10;
+    void ProcessVbus();
+    bool vbusSampleHigh_ = false;
+    bool vbusInitialized_ = false;
+    bool usbAttached_ = false;
+    uint32_t vbusChangedMs_ = 0;
     uint8_t rx_[RxCapacity]{};
     volatile uint16_t rxHead_ = 0;
     volatile uint16_t rxTail_ = 0;

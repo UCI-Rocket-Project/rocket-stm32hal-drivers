@@ -51,8 +51,18 @@ bool RGBLED::Enqueue(OperationType type, Color color, uint32_t durationTicks, ui
 
 bool RGBLED::SetDefaultPulse(Color color, uint32_t periodTicks) {
     if (periodTicks == 0) return false;
-    defaultPulseColor = color;
-    defaultPulsePeriodTicks = periodTicks;
+    defaultType = OperationType::Pulse;
+    defaultColor = color;
+    defaultPeriodTicks = periodTicks;
+    defaultStarted = false;
+    return true;
+}
+
+bool RGBLED::SetDefaultBlink(Color color, uint32_t periodTicks) {
+    if (periodTicks < 2) return false;
+    defaultType = OperationType::Blink;
+    defaultColor = color;
+    defaultPeriodTicks = periodTicks;
     defaultStarted = false;
     return true;
 }
@@ -82,12 +92,18 @@ void RGBLED::Process(uint32_t nowTicks) {
         activeStarted = false;
     }
 
-    if (defaultPulsePeriodTicks != 0) {
+    if (defaultPeriodTicks != 0) {
         if (!defaultStarted) {
             defaultStartTicks = nowTicks;
             defaultStarted = true;
         }
-        DisplayPulse(defaultPulseColor, nowTicks - defaultStartTicks, defaultPulsePeriodTicks);
+        if (defaultType == OperationType::Blink) {
+            const bool on = ((nowTicks - defaultStartTicks) % defaultPeriodTicks) <
+                            (defaultPeriodTicks / 2U);
+            SetColor(on ? defaultColor : Color{0, 0, 0});
+        } else {
+            DisplayPulse(defaultColor, nowTicks - defaultStartTicks, defaultPeriodTicks);
+        }
     } else {
         SetColor({0, 0, 0});
     }

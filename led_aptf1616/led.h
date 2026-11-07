@@ -23,12 +23,13 @@ public:
 
     // All times are raw ticks from the clock passed to Process(). Durations
     // begin when Process first selects an operation. Queued operations run FIFO;
-    // the default pulse runs only while the queue is empty.
+    // the default pulse or blink runs only while the queue is empty.
     // Call these methods from one execution context (not concurrently with an ISR).
     // Returns false for a zero duration, an invalid period, or a full queue.
     bool QueueBlink(Color color, uint32_t durationTicks, uint32_t periodTicks);
     bool QueuePulse(Color color, uint32_t durationTicks, uint32_t periodTicks);
     bool SetDefaultPulse(Color color, uint32_t periodTicks);
+    bool SetDefaultBlink(Color color, uint32_t periodTicks);
     void Process(uint32_t nowTicks);
 
     // Brightness values are in the range 0 (off) to MaxBrightness (full).
@@ -57,8 +58,9 @@ private:
     size_t queueSize = 0;
     uint32_t activeStartTicks = 0;
     bool activeStarted = false;
-    Color defaultPulseColor = {0, 0, 0};
-    uint32_t defaultPulsePeriodTicks = 0;
+    OperationType defaultType = OperationType::Pulse;
+    Color defaultColor = {0, 0, 0};
+    uint32_t defaultPeriodTicks = 0;
     uint32_t defaultStartTicks = 0;
     bool defaultStarted = false;
 };
